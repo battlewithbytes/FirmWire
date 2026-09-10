@@ -179,6 +179,13 @@ class MT6878Machine(FirmWireEmu):
         # import IPython; IPython.embed()
         assert self.playground is not None
 
+        # Explicit manifest mode maps existing RAM windows to shared files.
+        # Any validation failure aborts startup; never silently run disconnected.
+        manifest_path = os.environ.get("FIRMWIRE_DEVICE_MANIFEST")
+        if manifest_path:
+            from firmwire.hw.cockpit_manifest import attach_manifest
+            attach_manifest(self, manifest_path)
+
         if args.fuzz:
             log.info("Fuzzing mode active (no debug output)")
             self._fuzzing = True
