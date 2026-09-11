@@ -1,0 +1,36 @@
+"""Read-only, exact-image-bound RAM observation validation (no emulator imports)."""
+
+
+def validate_ram_observer(config, rom_sha256, ranges_at):
+    """Reject anything not unambiguously ordinary readable/writable RAM.
+
+    ``ranges_at`` returns Avatar interval objects. Validate every byte so an
+    overlapping MMIO interval cannot hide inside an otherwise valid word.
+    """
+    if (not isinstance(config, dict) or
+            config.get("schema") != "cockpit.mtk-ram-observer/v1" or
+            config.get("rom_sha256") != rom_sha256):
+        raise ValueError("RAM observer image identity mismatch")
+    words = config.get("words")
+    if not isinstance(words, list) or not 1 <= len(words) <= 16:
+        raise ValueError("RAM observer requires 1..16 word addresses")
+    for address in words:
+        if type(address) is not int or not 0 <= address <= 0xfffffffc or address % 4:
+            raise ValueError("RAM observer requires aligned 32-bit integer addresses")
+        for byte in range(address, address + 4):
+            ranges = list(ranges_at(byte))
+            if len(ranges) != 1:
+                raise ValueError("RAM observer may not read holes or overlapping regions")
+            region = ranges[0]
+            data = region.data
+            permissions = getattr(data, "permissions", "")
+            if (region.begin > address or address + 4 > region.end or
+                    getattr(data, "forwarded", True) or
+                    getattr(data, "is_special", True) or
+                    getattr(data, "is_symbolic", True) or
+                    getattr(data, "emulate", None) is not None or
+                    "r" not in permissions or "w" not in permissions):
+                raise ValueError("RAM observer may only read ordinary RAM, not MMIO/ROM")
+    if len(set(words)) != len(words):
+        raise ValueError("RAM observer contains duplicate words")
+    return list(words)

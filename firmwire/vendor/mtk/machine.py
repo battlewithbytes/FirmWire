@@ -22,6 +22,7 @@ from firmwire.vendor.mtk.hooks import (
     NU_Set_Events_hook,
 )
 from firmwire.vendor.mtk.mtk_task import MtkTask, TASK_STRUCT_SIZE
+from firmwire.vendor.mtk.observation import validate_ram_observer
 
 from firmwire.util.port import find_free_port
 from firmwire.emulator.firmwire import FirmWireEmu
@@ -661,7 +662,7 @@ class MT6878Machine(FirmWireEmu):
         return True
 
     def _install_execution_evidence(self):
-        """Bounded address-only progress evidence; not a task/handshake claim."""
+        """Bounded PC evidence and opt-in RAM samples, not a task/handshake claim."""
         report = self.loader.capability_report
         report["execution"] = {"completed_blocks": 0, "sampled_pcs": []}
         seen = set()
@@ -671,18 +672,10 @@ class MT6878Machine(FirmWireEmu):
         if observe:
             with open(observe) as source:
                 config = json.load(source)
-            if (config.get("schema") != "cockpit.mtk-ram-observer/v1" or
-                    config.get("rom_sha256") != report["rom_sha256"]):
-                raise ValueError("RAM observer image identity mismatch")
-            watches = config.get("words", [])
-            if not isinstance(watches, list) or len(watches) > 16:
-                raise ValueError("RAM observer requires at most 16 word addresses")
-            for address in watches:
-                if type(address) is not int or address % 4:
-                    raise ValueError("RAM observer requires aligned integer addresses")
-                ranges = self.avatar.memory_ranges.at(address)
-                if not ranges or any(r.data.forwarded or address + 4 > r.end for r in ranges):
-                    raise ValueError("RAM observer may not read MMIO, holes or boundaries")
+            watches = validate_ram_observer(config, report["rom_sha256"],
+                                           self.avatar.memory_ranges.at)
+            report["ram_observer"] = {"read_only": True, "words": watches,
+                                      "rom_sha256": report["rom_sha256"]}
 
         @self.panda.cb_after_block_exec
         def cockpit_after_block(cpu, tb, exit_code):
@@ -709,6 +702,11 @@ class MT6878Machine(FirmWireEmu):
                     execution["observed_ram"] = {hex(address):
                         int.from_bytes(self.panda.physical_memory_read(address, 4), "little")
                         for address in watches}
+                    history = execution.setdefault("ram_changes", [])
+                    if not history or history[-1]["words"] != execution["observed_ram"]:
+                        history.append({"completed_blocks": count,
+                                        "words": dict(execution["observed_ram"])})
+                        del history[:-16]
                 self.loader.write_capability_report()
                 if count <= 1000000:
                     log.info("Native execution: %d completed blocks; last PC %#x", count, pc)
