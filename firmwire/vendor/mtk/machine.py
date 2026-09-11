@@ -50,6 +50,7 @@ class MT6878Machine(FirmWireEmu):
             return False
         native = loader.boot_mode == "native"
         mt_topology = None
+        platform_memory_map = loader.memory_map
         if loader.loader_args["cpu_topology"] is not None:
             if not native:
                 log.error("CPU topology profiles are native-diagnostic only")
@@ -58,6 +59,13 @@ class MT6878Machine(FirmWireEmu):
                 mt_topology, topology_report = load_profile(
                     loader.loader_args["cpu_topology"], loader.capability_report["rom_sha256"],
                     loader.loader_args["cpu_model"])
+                from .boot_slave import apply_boot_slave_profile
+                platform_memory_map, platform_report = apply_boot_slave_profile(
+                    loader.memory_map, topology_report["profile"], mt_topology)
+                if platform_report is not None:
+                    topology_report["platform_device"] = platform_report
+                    topology_report["additional_core_release_wired"] = True
+                    log.warning("EXPERIMENTAL MTK boot-slave analysis enabled; power/interrupt controllers are NOT modeled")
             except (ValueError, OSError) as exc:
                 log.error("Invalid CPU topology profile: %s", exc)
                 return False
@@ -204,7 +212,7 @@ class MT6878Machine(FirmWireEmu):
             SMEM_USER_RAW_MDCCCI_DBG, CCCI_EE_SMEM_TOTAL_SIZE, name="RAW_MDCCCI_DBG"
         )
 
-        self.apply_memory_map(self.loader.memory_map)
+        self.apply_memory_map(platform_memory_map)
 
         # For Fuzzing Task Setup
         self.playground = self.avatar.add_memory_range(
