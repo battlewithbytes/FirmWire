@@ -11,6 +11,7 @@ import sys
 import lz4.frame
 import re
 import pickle
+import json
 
 from io import BytesIO
 from os import stat
@@ -20,11 +21,11 @@ from tarfile import TarFile
 from avatar2 import *
 from pathlib import PurePath
 
-from firmwire.emulator.patterndb import PatternDB, PatternDBEntry
 from firmwire.hw.soc import get_soc
 from .mtkdb.parse_mdb import readCATD
 from .mtkdb.parse_lted import readLTED
 from .pattern import PATTERNS
+from .resolution import Resolver
 from .machine import MT6878Machine
 from .hw import *
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
@@ -75,6 +76,22 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "boot_mode": {
+            "type": str, "choices": ["rehosted", "native"], "default": "rehosted",
+            "help": "rehosted requires validated startup hooks; native attempts unpatched diagnostic execution",
+        },
+        "debug_info": {
+            "type": str, "choices": ["auto", "ignore"], "default": "auto",
+            "help": "ignore withholds debug information for stripped-image regression tests",
+        },
+        "symbol_profile": {
+            "type": PurePath, "default": None,
+            "help": "Reviewed ROM-hash-bound symbol locations/signatures (JSON)",
+        },
+        "observe_ram": {
+            "type": PurePath, "default": None,
+            "help": "Native diagnostics: ROM-hash-bound JSON list of RAM words to observe (no MMIO)",
+        },
         "nv_data": {
             "type": PurePath,
             "help": "A path to MTK vendor data directory",
@@ -102,15 +119,46 @@ class MTKLoader(firmwire.loader.Loader):
 
         self.sections = {s.name: s for s in self.iter_section_info()}
 
-        dbg_info = self.parse_debug_info()
-
-        if dbg_info is None:
+        if MAIN_IMG_NAME not in self.sections or "md1dsp" not in self.sections:
+            log.error("MTK image requires md1rom and md1dsp, not debug information")
+            return False
+        try:
+            dbg_info = {} if self.loader_args["debug_info"] == "ignore" else self.parse_debug_info()
+        except (ValueError, EOFError, struct.error, lzma.LZMAError) as exc:
+            log.error("Malformed optional debug information: %s", exc)
             return False
 
-        self.symbols = {name: v[0] for name, v in dbg_info.items()}
-        self.symbol_sizes = {name: v[1] for name, v in dbg_info.items()}
-
         if not self.guess_soc_version():
+            return False
+
+        self.boot_mode = self.loader_args["boot_mode"]
+        rom = self.rom_img_data()
+        if not rom or len(rom) > 0x2000000:
+            log.error("ROM does not fit the current MTK platform's 32-MiB ROM window")
+            return False
+        resolver = Resolver(rom, 0x90000000 + ROM_BASE_ADDR, self.modem_soc.name, dbg_info)
+        try:
+            profile = self.loader_args["symbol_profile"]
+            if profile:
+                with open(profile) as source:
+                    resolver.apply_profile(json.load(source))
+            resolver.scoped_patterns(PATTERNS)
+        except (ValueError, OSError, TypeError) as exc:
+            self.capability_report = resolver.capabilities(self.boot_mode)
+            self.capability_report["profile_error"] = str(exc)
+            self.capability_report["startup_locations_ready"] = False
+            self.write_capability_report()
+            log.error("Symbol profile rejected: %s", exc)
+            return False
+        self.symbols, self.symbol_sizes = resolver.symbols, resolver.sizes
+        self.capability_report = resolver.capabilities(self.boot_mode)
+        self.capability_report["debug_info_policy"] = self.loader_args["debug_info"]
+        self.write_capability_report()
+        if not self.capability_report["startup_locations_ready"]:
+            missing = sorted({name for g in self.capability_report["capabilities"].values()
+                              if g["required"] for name in g["missing"]})
+            log.error("Rehosted startup requires unresolved locations: %s. See capabilities.json. "
+                      "Use explicit native mode for unpatched diagnostic execution.", ", ".join(missing))
             return False
 
         if not self.build_memory_map():
@@ -119,7 +167,9 @@ class MTKLoader(firmwire.loader.Loader):
         log.info("Loaded MTK image with %d sections", len(self.sections))
 
         parsed_lted = None
-        if not self.workspace.path("/ltedb.pickle").exists():
+        if self.boot_mode == "native":
+            log.warning("Native diagnostic mode: no symbol-based startup patches, task surgery or named trace hooks")
+        elif not self.workspace.path("/ltedb.pickle").exists():
 
             log.info("Parsing MTK debug database...")
 
@@ -179,30 +229,13 @@ class MTKLoader(firmwire.loader.Loader):
 
         log.info("Using NV data from %s", nv_data_path)
 
-        # resolve patterns
-        all_data = self.rom_img_data()
-        data_base_addr = 0x90000000 + ROM_BASE_ADDR
-
-        try:
-            db = PatternDB(self)
-
-            for name, entry in PATTERNS.items():
-                pat = PatternDBEntry(name)
-                for k, v in entry.items():
-                    setattr(pat, k, v)
-
-                db.add_pattern(pat)
-
-            db.find_patterns(all_data, data_base_addr)
-
-            # MTK HACK: copy symbol table to symbols
-            for sym in self.symbol_table.symbols:
-                self.symbols[sym.name] = sym.address
-        except ValueError as e:
-            log.exception("Error resolving symbols")
-            return False
-
         return True
+
+    def write_capability_report(self):
+        pending = self.workspace.path("/capabilities.json.tmp").to_path()
+        with open(pending, "w") as output:
+            json.dump(self.capability_report, output, indent=2)
+        os.replace(pending, self.workspace.path("/capabilities.json").to_path())
 
     def unpack_md1img(self, infile):
         while True:
@@ -232,6 +265,8 @@ class MTKLoader(firmwire.loader.Loader):
         out = bytearray()
         while True:
             c = raw.read(1)
+            if not c:
+                raise EOFError("unterminated debug-info string")
             if c == b"\x00":
                 break
             out += c
@@ -242,8 +277,8 @@ class MTKLoader(firmwire.loader.Loader):
 
     def parse_debug_info(self):
         if DBG_INFO_NAME not in self.sections:
-            log.error("Missing required section %s", DBG_INFO_NAME)
-            return None
+            log.info("No %s; continuing without vendor function symbols", DBG_INFO_NAME)
+            return {}
 
         log.info("Parsing debug info...")
 

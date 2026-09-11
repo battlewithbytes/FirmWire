@@ -6,6 +6,7 @@ import struct
 import fcntl
 import logging
 import time
+import json
 
 from avatar2 import *
 
@@ -40,6 +41,16 @@ class MT6878Machine(FirmWireEmu):
         self.ports = {}
 
     def initialize(self, loader, args):
+        # No emulator process, firmware patch or task-table write before the
+        # selected mode's location requirements have been validated.
+        if not loader.capability_report["startup_locations_ready"]:
+            log.error("Unresolved startup capabilities; refusing machine initialization")
+            return False
+        native = loader.boot_mode == "native"
+        if native and any((args.injected_task, args.fuzz, args.fuzz_triage,
+                           args.fuzz_input, args.fuzz_crashlog_replay, args.fuzz_persistent)):
+            log.error("Native diagnostic mode does not support symbol-dependent task injection/fuzzing")
+            return False
         if not super().initialize(loader):
             return False
 
@@ -240,6 +251,21 @@ class MT6878Machine(FirmWireEmu):
             ROM_BASE_ADDR, self.loader.rom_img_data()
         )
 
+        self.loader.capability_report["machine_initialized"] = True
+        self.loader.write_capability_report()
+        if native:
+            # Existing platform MMIO models still apply. Do not confuse this
+            # with full silicon fidelity, or install the legacy symbol-based
+            # core-sync/security/assert/task workarounds below.
+            self._install_execution_evidence()
+            self.panda.athread.warned = True
+            return True
+
+        optional = self.loader.capability_report["capabilities"]
+        for name, capability in optional.items():
+            if not capability["required"] and not capability["available"]:
+                log.info("Optional capability %s unavailable: %s", name, capability["missing"])
+
         self.add_debug_hooks()
 
         # Custom, non-function symbols
@@ -324,7 +350,7 @@ class MT6878Machine(FirmWireEmu):
 
         # For printing trace entries, we hook dhl_internal_trace_impl, which gets only called if the trace check returns 0
         # For performance reasons, we implement this via a patch, rather than a breakpoint.
-        if not self._fuzzing:
+        if not self._fuzzing and optional["trace_filter_patch"]["available"]:
             newcode_ret0 = b"\x00\x6a" + b"\xa0\xe8\x00\x65"
             patchAddr = symbols["tst_trace_check_ps_filter_off"]
             qemu.pypanda.physical_memory_write(patchAddr, newcode_ret0)
@@ -471,7 +497,7 @@ class MT6878Machine(FirmWireEmu):
                 # symbols['stack_init_tasks']+1# , symbols['stack_init_comp_info']+1# , symbols['stack_init']+1
                 # symbols['mainp']+1,
             ]
-        )
+        ) if optional["named_error_logging"]["available"] else frozenset()
         if not self._fuzzing:
             for addr in exit_functions:
                 self.add_panda_hook(addr & ~1, exit_hook)
@@ -582,17 +608,20 @@ class MT6878Machine(FirmWireEmu):
         )
 
         if not self._fuzzing:
-            self.add_panda_hook(symbols["dhl_internal_trace_impl"], dhl_trace_hook)
-            self.add_panda_hook(symbols["dhl_print"], dhl_print_hook)
-            self.add_panda_hook(symbols["dhl_print_string"], dhl_print_hook)
-            self.add_panda_hook(symbols["kal_prompt_trace"], prompt_trace_hook)
-            self.add_panda_hook(symbols["tst_sys_trace"], sys_trace_hook)
-            self.add_panda_hook(symbols["tst_sysfatal_trace"], sys_trace_hook)
-            self.add_panda_hook(symbols["NU_Set_Events"], NU_Set_Events_hook)
-            self.add_panda_hook(
-                symbols["TCC_Task_Ready_To_Scheduled_Return"],
-                TCC_Task_Ready_To_Scheduled_Return,
-            )
+            if optional["named_trace_logging"]["available"]:
+                self.add_panda_hook(symbols["dhl_internal_trace_impl"], dhl_trace_hook)
+                self.add_panda_hook(symbols["dhl_print"], dhl_print_hook)
+                self.add_panda_hook(symbols["dhl_print_string"], dhl_print_hook)
+                self.add_panda_hook(symbols["kal_prompt_trace"], prompt_trace_hook)
+                self.add_panda_hook(symbols["tst_sys_trace"], sys_trace_hook)
+                self.add_panda_hook(symbols["tst_sysfatal_trace"], sys_trace_hook)
+            if optional["event_logging"]["available"]:
+                self.add_panda_hook(symbols["NU_Set_Events"], NU_Set_Events_hook)
+            if optional["task_switch_logging"]["available"]:
+                self.add_panda_hook(
+                    symbols["TCC_Task_Ready_To_Scheduled_Return"],
+                    TCC_Task_Ready_To_Scheduled_Return,
+                )
 
             """
             def buffer_print_hook(self, env, tb, hook):
@@ -630,6 +659,61 @@ class MT6878Machine(FirmWireEmu):
         self.panda.athread.warned = True
 
         return True
+
+    def _install_execution_evidence(self):
+        """Bounded address-only progress evidence; not a task/handshake claim."""
+        report = self.loader.capability_report
+        report["execution"] = {"completed_blocks": 0, "sampled_pcs": []}
+        seen = set()
+        recent = []
+        watches = []
+        observe = self.loader.loader_args.get("observe_ram")
+        if observe:
+            with open(observe) as source:
+                config = json.load(source)
+            if (config.get("schema") != "cockpit.mtk-ram-observer/v1" or
+                    config.get("rom_sha256") != report["rom_sha256"]):
+                raise ValueError("RAM observer image identity mismatch")
+            watches = config.get("words", [])
+            if not isinstance(watches, list) or len(watches) > 16:
+                raise ValueError("RAM observer requires at most 16 word addresses")
+            for address in watches:
+                if type(address) is not int or address % 4:
+                    raise ValueError("RAM observer requires aligned integer addresses")
+                ranges = self.avatar.memory_ranges.at(address)
+                if not ranges or any(r.data.forwarded or address + 4 > r.end for r in ranges):
+                    raise ValueError("RAM observer may not read MMIO, holes or boundaries")
+
+        @self.panda.cb_after_block_exec
+        def cockpit_after_block(cpu, tb, exit_code):
+            execution = report["execution"]
+            execution["completed_blocks"] += 1
+            count = execution["completed_blocks"]
+            pc = int(tb.pc)
+            execution["last_block_pc"] = pc
+            if not recent or recent[-1] != pc:
+                recent.append(pc)
+                del recent[:-32]
+            if len(seen) < 64 and pc not in seen:
+                seen.add(pc)
+                execution["sampled_pcs"].append(pc)
+            report["cpu_execution_observed"] = True
+            # Persist early progress and exponentially-spaced checkpoints, not
+            # every instruction. A killed run retains a conservative count.
+            if count in (1, 10, 100, 1000, 10000) or count % 100000 == 0:
+                execution["recent_pcs"] = list(recent)
+                # Do not access CPUArchState through legacy CFFI here: its
+                # native MIPS register accessor stalled the execution thread
+                # in validation. Address-only callbacks are independently tested.
+                if watches:
+                    execution["observed_ram"] = {hex(address):
+                        int.from_bytes(self.panda.physical_memory_read(address, 4), "little")
+                        for address in watches}
+                self.loader.write_capability_report()
+                if count <= 1000000:
+                    log.info("Native execution: %d completed blocks; last PC %#x", count, pc)
+
+        self.loader.write_capability_report()
 
     def read_phy_string(self, offset):
         sstr = bytes()
