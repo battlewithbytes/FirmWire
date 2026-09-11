@@ -179,6 +179,27 @@ class MT6878Machine(FirmWireEmu):
         # import IPython; IPython.embed()
         assert self.playground is not None
 
+        # OPTIONAL: AP<->modem CCCI co-simulation bridge. Off unless
+        # FIRMWIRE_CCCI_BRIDGE is set in the environment. When enabled it backs
+        # the RAW_MDCCCI_DBG SMEM window with a MAP_SHARED file the QEMU AP also
+        # maps (overwrite=True replaces the private range added above) and adds a
+        # CCIF doorbell peripheral. See firmwire/hw/ccci_bridge.py and
+        # qemu/docs/2026-09-10-ccci-bridge-impl.md. Import is lazy + guarded so a
+        # normal run neither imports nor touches any of it.
+        if os.environ.get("FIRMWIRE_CCCI_BRIDGE") in ("1", "true", "yes", "on"):
+            from firmwire.hw.ccci_bridge import maybe_attach_from_env
+
+            # CCIF MMIO base is arbitrary here (the real MT6765 offset is a
+            # reverse-engineering target); page-aligned and clear of the SMEM
+            # windows the SHM runtime feature advertises (0x69100000/0x69200000).
+            CCIF_DOORBELL_BASE = 0x69300000
+            maybe_attach_from_env(
+                self,
+                smem_base=SMEM_USER_RAW_MDCCCI_DBG,
+                smem_size=CCCI_EE_SMEM_TOTAL_SIZE,
+                ccif_base=CCIF_DOORBELL_BASE,
+            )
+
         if args.fuzz:
             log.info("Fuzzing mode active (no debug output)")
             self._fuzzing = True
@@ -232,6 +253,13 @@ class MT6878Machine(FirmWireEmu):
         self.qemu.pypanda.physical_memory_write(
             ROM_BASE_ADDR, self.loader.rom_img_data()
         )
+
+        # Preload the original DRDI (dynamic radio data) bytes to their
+        # CHECK_HEADER load location so the firmware can initialize its radio
+        # tables. No-op if mtkloader is unavailable or the image lacks a DRDI
+        # record. See firmwire/vendor/mtk/drdi_preload.py.
+        from .drdi_preload import preload_drdi
+        preload_drdi(self, self.loader)
 
         self.add_debug_hooks()
 
