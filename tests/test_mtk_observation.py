@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 spec = importlib.util.spec_from_file_location(
     "mtk_observation", Path(__file__).resolve().parents[1] /
@@ -33,9 +34,9 @@ class RamObserverTests(unittest.TestCase):
 
     def test_marker_counts_are_context_local_not_task_claims(self):
         first, second = {}, {}
-        module.record_pc_marker(first, "entry", 10)
-        module.record_pc_marker(first, "entry", 30)
-        module.record_pc_marker(second, "entry", 20)
+        self.assertTrue(module.record_pc_marker(first, "entry", 10))
+        self.assertFalse(module.record_pc_marker(first, "entry", 30))
+        self.assertTrue(module.record_pc_marker(second, "entry", 20))
         self.assertEqual(first["pc_markers"]["entry"],
                          dict(hits=2, first_block=10, last_block=30))
         self.assertEqual(second["pc_markers"]["entry"]["hits"], 1)
@@ -52,6 +53,38 @@ class RamObserverTests(unittest.TestCase):
 
     def test_ram_boundaries(self):
         self.assertEqual(self.check(), self.config["words"])
+
+    def test_sampler_is_relocatable_and_image_bound(self):
+        # Unrelated synthetic images/layouts; no Lagos or vendor source data.
+        for identity, base in (("a" * 64, 0x1000), ("b" * 64, 0x7000)):
+            config = dict(self.config, rom_sha256=identity, words=[base, base + 12])
+            reader = Mock(side_effect=[b"\x01\x02\x03\x04", b"\x05\0\0\0"])
+            sampler = module.RamObservation(config, identity,
+                lambda _: [region(base, base + 16)], reader)
+            self.assertEqual(sampler.sample(123), {"completed_blocks": 123,
+                "words": {hex(base): 0x04030201, hex(base + 12): 5}})
+            self.assertEqual([call.args for call in reader.call_args_list],
+                             [(base, 4), (base + 12, 4)])
+            with self.assertRaises(ValueError):
+                module.RamObservation(config, "c" * 64, lambda _: [region()], reader)
+            self.assertEqual(reader.call_count, 2)
+
+    def test_sampler_never_reads_unvalidated_mmio_or_holes(self):
+        reader = Mock()
+        for ranges in ([], [region(forwarded=True)], [region(), region()]):
+            with self.subTest(ranges=ranges), self.assertRaises(ValueError):
+                module.RamObservation(self.config, "a" * 64, lambda _: ranges, reader)
+        reader.assert_not_called()
+
+    def test_sampler_snapshots_do_not_alias_and_short_reads_fail(self):
+        reader = Mock(return_value=b"\1\0\0\0")
+        sampler = module.RamObservation(self.config, "a" * 64, lambda _: [region()], reader)
+        first = sampler.sample(1)
+        first["words"]["0x1000"] = 99
+        self.assertEqual(sampler.sample(2)["words"]["0x1000"], 1)
+        reader.return_value = b"\0"
+        with self.assertRaises(ValueError):
+            sampler.sample(3)
 
     def test_identity_and_malformed_root(self):
         for config in ([], None, {}, dict(self.config, rom_sha256="b" * 64),

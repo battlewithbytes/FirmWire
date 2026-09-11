@@ -22,7 +22,7 @@ from firmwire.vendor.mtk.hooks import (
     NU_Set_Events_hook,
 )
 from firmwire.vendor.mtk.mtk_task import MtkTask, TASK_STRUCT_SIZE
-from firmwire.vendor.mtk.observation import validate_ram_observer, validate_pc_markers, record_pc_marker
+from firmwire.vendor.mtk.observation import RamObservation, validate_pc_markers, record_pc_marker
 
 from firmwire.util.port import find_free_port
 from firmwire.emulator.firmwire import FirmWireEmu
@@ -301,6 +301,13 @@ class MT6878Machine(FirmWireEmu):
         self.qemu.pypanda.physical_memory_write(
             ROM_BASE_ADDR, self.loader.rom_img_data()
         )
+
+        # Experimental adapter supplied explicitly by the DRDI integration test.
+        # Keep normal boots unchanged; a requested preload must not silently skip.
+        if os.environ.get("FIRMWIRE_DRDI_PRELOAD") == "1":
+            from .drdi_preload import preload_drdi
+            if not preload_drdi(self, self.loader):
+                raise RuntimeError("Requested DRDI preload did not complete")
 
         self.loader.capability_report["machine_initialized"] = True
         self.loader.write_capability_report()
@@ -728,12 +735,34 @@ class MT6878Machine(FirmWireEmu):
         watches = []
         pc_markers = {}
         peripheral_controls = {}
+        exception_trace = None
+        ram_sampler = None
+
+        def sample_ram():
+            if ram_sampler is None:
+                return
+            execution = report["execution"]
+            snapshot = ram_sampler.sample(execution["completed_blocks"])
+            execution["observed_ram"] = snapshot["words"]
+            execution["observed_ram_at_block"] = snapshot["completed_blocks"]
+            history = execution.setdefault("ram_changes", [])
+            if not history or history[-1]["words"] != snapshot["words"]:
+                history.append(snapshot)
+                del history[:-16]
+
+        def persist_exception_evidence():
+            # Exceptions may precede an MMIO-thread failure by only a few
+            # blocks. Never present the prior periodic RAM sample as current.
+            sample_ram()
+            self.loader.write_capability_report()
+
         observe = self.loader.loader_args.get("observe_ram")
         if observe:
             with open(observe) as source:
                 config = json.load(source)
-            watches = validate_ram_observer(config, report["rom_sha256"],
-                                           self.avatar.memory_ranges.at)
+            ram_sampler = RamObservation(config, report["rom_sha256"],
+                self.avatar.memory_ranges.at, self.panda.physical_memory_read)
+            watches = ram_sampler.words
             pc_markers = validate_pc_markers(config)
             requested_controls = config.get("peripheral_controls", [])
             if requested_controls not in ([], ["AES_TOP0"]):
@@ -747,6 +776,13 @@ class MT6878Machine(FirmWireEmu):
             report["ram_observer"] = {"read_only": True, "words": watches,
                                       "rom_sha256": report["rom_sha256"],
                                       "pc_markers": config.get("pc_markers", {})}
+            observe_exceptions = config.get("cpu_exceptions", False)
+            if type(observe_exceptions) is not bool:
+                raise ValueError("cpu_exceptions observer option must be boolean")
+            if observe_exceptions:
+                from .exception_observation import install_exception_observer
+                exception_trace = install_exception_observer(self.panda, report, context_labels,
+                                                              persist_exception_evidence)
 
         @self.panda.cb_after_block_exec
         def cockpit_after_block(cpu, tb, exit_code):
@@ -763,8 +799,9 @@ class MT6878Machine(FirmWireEmu):
             per_cpu["completed_blocks"] += 1
             per_cpu["last_block_pc"] = pc
             marker = pc_markers.get(pc)
+            first_marker = False
             if marker is not None:
-                record_pc_marker(per_cpu, marker, count)
+                first_marker = record_pc_marker(per_cpu, marker, count)
             context_recent = per_cpu.setdefault("recent_pcs", [])
             if not context_recent or context_recent[-1] != pc:
                 context_recent.append(pc)
@@ -781,8 +818,10 @@ class MT6878Machine(FirmWireEmu):
             report["cpu_execution_observed"] = True
             # Persist early progress and exponentially-spaced checkpoints, not
             # every instruction. A killed run retains a conservative count.
-            if count in (1, 10, 100, 1000, 10000) or count % 100000 == 0:
+            if first_marker or count in (1, 10, 100, 1000, 10000) or count % 100000 == 0:
                 execution["recent_pcs"] = list(recent)
+                if exception_trace is not None:
+                    execution["cpu_exceptions"] = exception_trace.snapshot()
                 if "security_domain" in report:
                     report["security_domain"] = self.peripheral_map["AES_TOP0"].analysis_facts()
                 if peripheral_controls:
@@ -791,15 +830,10 @@ class MT6878Machine(FirmWireEmu):
                 # Do not access CPUArchState through legacy CFFI here: its
                 # native MIPS register accessor stalled the execution thread
                 # in validation. Address-only callbacks are independently tested.
-                if watches:
-                    execution["observed_ram"] = {hex(address):
-                        int.from_bytes(self.panda.physical_memory_read(address, 4), "little")
-                        for address in watches}
-                    history = execution.setdefault("ram_changes", [])
-                    if not history or history[-1]["words"] != execution["observed_ram"]:
-                        history.append({"completed_blocks": count,
-                                        "words": dict(execution["observed_ram"])})
-                        del history[:-16]
+                sample_ram()
+                if first_marker:
+                    per_cpu["pc_markers"][marker]["first_ram"] = dict(
+                        execution.get("observed_ram", {}))
                 self.loader.write_capability_report()
                 if count <= 1000000:
                     log.info("Native execution: %d completed blocks; last PC %#x", count, pc)

@@ -56,7 +56,30 @@ def validate_pc_markers(config):
 
 
 def record_pc_marker(context, name, completed_blocks):
+    """Return true only on the first hit, allowing a bounded durable checkpoint."""
     markers = context.setdefault("pc_markers", {})
     sample = markers.setdefault(name, dict(hits=0, first_block=completed_blocks))
     sample["hits"] += 1
     sample["last_block"] = completed_blocks
+    return sample["hits"] == 1
+
+
+class RamObservation:
+    """Fixed-address, ROM-bound snapshots; no firmware semantics or pointer chasing.
+
+    The adapter supplies the memory map and byte reader. Only explicitly
+    approved ordinary RAM words are read; unknown mappings fail before reads.
+    """
+
+    def __init__(self, config, rom_sha256, ranges_at, read_bytes):
+        self.words = validate_ram_observer(config, rom_sha256, ranges_at)
+        self._read_bytes = read_bytes
+
+    def sample(self, completed_blocks):
+        words = {}
+        for address in self.words:
+            value = self._read_bytes(address, 4)
+            if len(value) != 4:
+                raise ValueError("RAM observer received a short word read")
+            words[hex(address)] = int.from_bytes(value, "little")
+        return {"completed_blocks": completed_blocks, "words": words}
