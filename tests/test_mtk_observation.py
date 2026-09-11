@@ -19,6 +19,28 @@ def region(begin=0x1000, end=0x2000, **kwargs):
 
 
 class RamObserverTests(unittest.TestCase):
+    def test_pc_markers_default_off_and_exact_lookup(self):
+        self.assertEqual(module.validate_pc_markers({}), {})
+        self.assertEqual(module.validate_pc_markers({"pc_markers": {"entry": 0x1234}}),
+                         {0x1234: "entry"})
+
+    def test_invalid_pc_marker_definitions_fail_closed(self):
+        for markers in (None, [], {"bad label": 2}, {"x": True}, {"x": -2},
+                        {"x": 3}, {"x": 1 << 32}, {"x": 2, "y": 2},
+                        {"x"*65: 2}, {"pc%d" % i: 2*i for i in range(17)}):
+            with self.subTest(markers=markers), self.assertRaises(ValueError):
+                module.validate_pc_markers({"pc_markers": markers})
+
+    def test_marker_counts_are_context_local_not_task_claims(self):
+        first, second = {}, {}
+        module.record_pc_marker(first, "entry", 10)
+        module.record_pc_marker(first, "entry", 30)
+        module.record_pc_marker(second, "entry", 20)
+        self.assertEqual(first["pc_markers"]["entry"],
+                         dict(hits=2, first_block=10, last_block=30))
+        self.assertEqual(second["pc_markers"]["entry"]["hits"], 1)
+        self.assertNotIn("task_progress_verified", first)
+
     def setUp(self):
         self.config = dict(schema="cockpit.mtk-ram-observer/v1", rom_sha256="a" * 64,
                            words=[0x1000, 0x1ffc])

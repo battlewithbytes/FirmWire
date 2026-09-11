@@ -34,3 +34,29 @@ def validate_ram_observer(config, rom_sha256, ranges_at):
     if len(set(words)) != len(words):
         raise ValueError("RAM observer contains duplicate words")
     return list(words)
+
+
+def validate_pc_markers(config):
+    """Optional exact TB entry markers; call after ROM-bound RAM validation.
+
+    Labels describe observation points, never independently certify tasks.
+    No register or guest-memory access is performed by this observer.
+    """
+    markers = config.get("pc_markers", {})
+    if not isinstance(markers, dict) or len(markers) > 16:
+        raise ValueError("PC observer supports at most 16 named entry markers")
+    for name, pc in markers.items():
+        if not isinstance(name, str) or not name.isidentifier() or len(name) > 64:
+            raise ValueError("PC marker names must be short identifiers")
+        if type(pc) is not int or not 0 <= pc <= 0xfffffffe or pc & 1:
+            raise ValueError("PC markers require even 32-bit TB entry addresses")
+    if len(set(markers.values())) != len(markers):
+        raise ValueError("PC marker addresses must be distinct")
+    return {pc: name for name, pc in markers.items()}
+
+
+def record_pc_marker(context, name, completed_blocks):
+    markers = context.setdefault("pc_markers", {})
+    sample = markers.setdefault(name, dict(hits=0, first_block=completed_blocks))
+    sample["hits"] += 1
+    sample["last_block"] = completed_blocks

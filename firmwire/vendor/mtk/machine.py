@@ -22,7 +22,7 @@ from firmwire.vendor.mtk.hooks import (
     NU_Set_Events_hook,
 )
 from firmwire.vendor.mtk.mtk_task import MtkTask, TASK_STRUCT_SIZE
-from firmwire.vendor.mtk.observation import validate_ram_observer
+from firmwire.vendor.mtk.observation import validate_ram_observer, validate_pc_markers, record_pc_marker
 
 from firmwire.util.port import find_free_port
 from firmwire.emulator.firmwire import FirmWireEmu
@@ -705,14 +705,17 @@ class MT6878Machine(FirmWireEmu):
         seen = set()
         recent = []
         watches = []
+        pc_markers = {}
         observe = self.loader.loader_args.get("observe_ram")
         if observe:
             with open(observe) as source:
                 config = json.load(source)
             watches = validate_ram_observer(config, report["rom_sha256"],
                                            self.avatar.memory_ranges.at)
+            pc_markers = validate_pc_markers(config)
             report["ram_observer"] = {"read_only": True, "words": watches,
-                                      "rom_sha256": report["rom_sha256"]}
+                                      "rom_sha256": report["rom_sha256"],
+                                      "pc_markers": config.get("pc_markers", {})}
 
         @self.panda.cb_after_block_exec
         def cockpit_after_block(cpu, tb, exit_code):
@@ -728,6 +731,13 @@ class MT6878Machine(FirmWireEmu):
                 {"completed_blocks": 0, "sampled_pcs": []})
             per_cpu["completed_blocks"] += 1
             per_cpu["last_block_pc"] = pc
+            marker = pc_markers.get(pc)
+            if marker is not None:
+                record_pc_marker(per_cpu, marker, count)
+            context_recent = per_cpu.setdefault("recent_pcs", [])
+            if not context_recent or context_recent[-1] != pc:
+                context_recent.append(pc)
+                del context_recent[:-16]
             if len(per_cpu["sampled_pcs"]) < 16 and pc not in per_cpu["sampled_pcs"]:
                 per_cpu["sampled_pcs"].append(pc)
             execution["last_block_pc"] = pc
