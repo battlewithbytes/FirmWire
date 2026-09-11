@@ -26,6 +26,7 @@ from firmwire.vendor.mtk.observation import validate_ram_observer
 
 from firmwire.util.port import find_free_port
 from firmwire.emulator.firmwire import FirmWireEmu
+from firmwire.emulator.mt_topology import load_profile, target_class
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,20 @@ class MT6878Machine(FirmWireEmu):
             log.error("Unresolved startup capabilities; refusing machine initialization")
             return False
         native = loader.boot_mode == "native"
+        mt_topology = None
+        if loader.loader_args["cpu_topology"] is not None:
+            if not native:
+                log.error("CPU topology profiles are native-diagnostic only")
+                return False
+            try:
+                mt_topology, topology_report = load_profile(
+                    loader.loader_args["cpu_topology"], loader.capability_report["rom_sha256"],
+                    loader.loader_args["cpu_model"])
+            except (ValueError, OSError) as exc:
+                log.error("Invalid CPU topology profile: %s", exc)
+                return False
+            loader.capability_report["engine_topology"] = topology_report
+            loader.write_capability_report()
         if native and any((args.injected_task, args.fuzz, args.fuzz_triage,
                            args.fuzz_input, args.fuzz_crashlog_replay, args.fuzz_persistent)):
             log.error("Native diagnostic mode does not support symbol-dependent task injection/fuzzing")
@@ -92,7 +107,12 @@ class MT6878Machine(FirmWireEmu):
         # used for unique temporary directories and shared memory queues for avatar
         self.instance_name = "MtkEMU" + str(self.ports["qemu_qmp"])
 
-        additional_args = ["-cpu", "24Kc"]  # FIXME: horrible hack on qemu side
+        # Platform-selected compatibility model, not a generic engine default.
+        # Keep the old pin usable; the isolated development engine requires the
+        # explicit cockpit-mtk-legacy model and fails if it is unavailable.
+        cpu_model = loader.loader_args["cpu_model"]
+        loader.capability_report["engine_cpu_model"] = cpu_model
+        additional_args = ["-cpu", cpu_model]
         additional_args += [
             "-drive",
             "if=none,id=drive0,file=%s,format=qcow2"
@@ -135,8 +155,9 @@ class MT6878Machine(FirmWireEmu):
             log.info("AFL panic address set [%s]", panic_addresses_fmt)
             os.environ["AFL_PANIC_ADDR"] = panic_addresses_fmt
 
+        target_options = {"mt_topology": mt_topology} if mt_topology else {}
         qemu = avatar.add_target(
-            PyPandaTarget,
+            target_class() if mt_topology else PyPandaTarget,
             name=self.instance_name,
             entry_address=ROM_BASE_ADDR,
             gdb_executable="gdb-multiarch",
@@ -148,6 +169,7 @@ class MT6878Machine(FirmWireEmu):
             # gdb_verbose=True,
             # log_items=['in_asm', 'int', 'exec', 'cpu', 'op', 'mmu', 'unimp'],
             log_file="/dev/stdout",
+            **target_options,
         )
 
         avatar.add_memory_range(
@@ -226,6 +248,11 @@ class MT6878Machine(FirmWireEmu):
         self.qemu = qemu
         avatar.init_targets()
         self.panda = qemu.pypanda
+        if mt_topology:
+            cpus = qemu.protocols.monitor.execute_command("query-cpus")
+            if not isinstance(cpus, list) or len(cpus) != mt_topology.cpu_count:
+                raise RuntimeError("PANDA did not realize the requested CPU topology; refusing execution")
+            loader.capability_report["engine_topology"]["realized_cpu_objects"] = len(cpus)
         # qemu.pypanda.disable_tb_chaining()
 
         if args.fuzz_triage:
@@ -664,7 +691,9 @@ class MT6878Machine(FirmWireEmu):
     def _install_execution_evidence(self):
         """Bounded PC evidence and opt-in RAM samples, not a task/handshake claim."""
         report = self.loader.capability_report
-        report["execution"] = {"completed_blocks": 0, "sampled_pcs": []}
+        report["execution"] = {"completed_blocks": 0, "sampled_pcs": [], "per_context": {},
+                               "context_identity": "opaque callback CPU pointer, not guest CPU id"}
+        context_labels = {}
         seen = set()
         recent = []
         watches = []
@@ -683,6 +712,16 @@ class MT6878Machine(FirmWireEmu):
             execution["completed_blocks"] += 1
             count = execution["completed_blocks"]
             pc = int(tb.pc)
+            # Even legacy CPUState CFFI field offsets can be stale. Compare
+            # opaque callback pointers without dereferencing either CPU struct.
+            # Labels indicate distinct callback objects, not hardware CPU IDs.
+            label = context_labels.setdefault(cpu, "context-%d" % len(context_labels))
+            per_cpu = execution["per_context"].setdefault(label,
+                {"completed_blocks": 0, "sampled_pcs": []})
+            per_cpu["completed_blocks"] += 1
+            per_cpu["last_block_pc"] = pc
+            if len(per_cpu["sampled_pcs"]) < 16 and pc not in per_cpu["sampled_pcs"]:
+                per_cpu["sampled_pcs"].append(pc)
             execution["last_block_pc"] = pc
             if not recent or recent[-1] != pc:
                 recent.append(pc)

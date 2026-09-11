@@ -76,6 +76,14 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "cpu_topology": {
+            "type": PurePath, "default": None,
+            "help": "Experimental ROM-bound native MIPS MT topology profile; requires matching development PANDA",
+        },
+        "cpu_model": {
+            "type": str, "choices": ["24Kc", "cockpit-mtk-legacy"], "default": "24Kc",
+            "help": "24Kc for the pinned legacy engine; cockpit-mtk-legacy requires the isolated-model development engine",
+        },
         "boot_mode": {
             "type": str, "choices": ["rehosted", "native"], "default": "rehosted",
             "help": "rehosted requires validated startup hooks; native attempts unpatched diagnostic execution",
