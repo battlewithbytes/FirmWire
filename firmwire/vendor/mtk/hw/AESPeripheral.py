@@ -3,13 +3,27 @@
 import logging
 
 from . import PassthroughPeripheral
+from .aes_observation import AESControlTrace
 
 # this is SEJ aka 'hacc' in the public linux kernel source
 class AES_TOP0_Periph(PassthroughPeripheral):
     def __init__(self, name, address, size, **kwargs):
         super().__init__(name, address, size, **kwargs)
+        self._control_trace = None
+
+    def enable_control_observer(self):
+        self._control_trace = AESControlTrace()
+
+    def control_observation(self):
+        return self._control_trace.snapshot() if self._control_trace is not None else None
 
     def hw_read(self, offset, size):
+        value = self._read_unobserved(offset, size)
+        if self._control_trace is not None:
+            self._control_trace.record("read", offset, size, value)
+        return value
+
+    def _read_unobserved(self, offset, size):
         if offset == 0x8:
             self.log.debug("read AES_TOP0:8")
 
@@ -24,6 +38,8 @@ class AES_TOP0_Periph(PassthroughPeripheral):
             return super().hw_read(offset, size)
 
     def hw_write(self, offset, size, value):
+        if self._control_trace is not None:
+            self._control_trace.record("write", offset, size, value)
         if offset == 0x0:
             self.log.debug("AES write CON")
         elif offset == 0x4:

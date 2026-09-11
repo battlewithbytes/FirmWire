@@ -706,6 +706,7 @@ class MT6878Machine(FirmWireEmu):
         recent = []
         watches = []
         pc_markers = {}
+        peripheral_controls = {}
         observe = self.loader.loader_args.get("observe_ram")
         if observe:
             with open(observe) as source:
@@ -713,6 +714,15 @@ class MT6878Machine(FirmWireEmu):
             watches = validate_ram_observer(config, report["rom_sha256"],
                                            self.avatar.memory_ranges.at)
             pc_markers = validate_pc_markers(config)
+            requested_controls = config.get("peripheral_controls", [])
+            if requested_controls not in ([], ["AES_TOP0"]):
+                raise ValueError("Only the explicit AES_TOP0 control observer is supported")
+            for name in requested_controls:
+                peripheral = self.peripheral_map.get(name)
+                if peripheral is None or not hasattr(peripheral, "enable_control_observer"):
+                    raise ValueError("Requested peripheral control observer is unavailable")
+                peripheral.enable_control_observer()
+                peripheral_controls[name] = peripheral
             report["ram_observer"] = {"read_only": True, "words": watches,
                                       "rom_sha256": report["rom_sha256"],
                                       "pc_markers": config.get("pc_markers", {})}
@@ -752,6 +762,9 @@ class MT6878Machine(FirmWireEmu):
             # every instruction. A killed run retains a conservative count.
             if count in (1, 10, 100, 1000, 10000) or count % 100000 == 0:
                 execution["recent_pcs"] = list(recent)
+                if peripheral_controls:
+                    execution["peripheral_controls"] = {name: peripheral.control_observation()
+                        for name, peripheral in peripheral_controls.items()}
                 # Do not access CPUArchState through legacy CFFI here: its
                 # native MIPS register accessor stalled the execution thread
                 # in validation. Address-only callbacks are independently tested.
