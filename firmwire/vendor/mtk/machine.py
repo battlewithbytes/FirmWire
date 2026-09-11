@@ -49,6 +49,21 @@ class MT6878Machine(FirmWireEmu):
             log.error("Unresolved startup capabilities; refusing machine initialization")
             return False
         native = loader.boot_mode == "native"
+        analysis_key = None
+        if loader.loader_args.get("sej_analysis_state") is not None:
+            if not native:
+                log.error("Synthetic SEJ is native-analysis only")
+                return False
+            if getattr(args, "restore_snapshot", None) or getattr(args, "snapshot_at", None):
+                log.error("Synthetic SEJ supports cold restart only; snapshots are not supported")
+                return False
+            from .hw.analysis_key import AnalysisKey
+            try:
+                from Crypto.Cipher import AES  # Check before creating identity.
+                analysis_key = AnalysisKey.load_or_create(loader.loader_args["sej_analysis_state"])
+            except (OSError, ValueError, ImportError) as exc:
+                log.error("Cannot enable synthetic SEJ analysis: %s", exc)
+                return False
         mt_topology = None
         platform_memory_map = loader.memory_map
         if loader.loader_args["cpu_topology"] is not None:
@@ -293,6 +308,12 @@ class MT6878Machine(FirmWireEmu):
             # Existing platform MMIO models still apply. Do not confuse this
             # with full silicon fidelity, or install the legacy symbol-based
             # core-sync/security/assert/task workarounds below.
+            if analysis_key is not None:
+                peripheral = self.peripheral_map.get("AES_TOP0")
+                if peripheral is None or not hasattr(peripheral, "enable_analysis"):
+                    raise ValueError("Synthetic SEJ requested but AES_TOP0 is unavailable")
+                peripheral.enable_analysis(analysis_key)
+                self.loader.capability_report["security_domain"] = peripheral.analysis_facts()
             self._install_execution_evidence()
             self.panda.athread.warned = True
             return True
@@ -762,6 +783,8 @@ class MT6878Machine(FirmWireEmu):
             # every instruction. A killed run retains a conservative count.
             if count in (1, 10, 100, 1000, 10000) or count % 100000 == 0:
                 execution["recent_pcs"] = list(recent)
+                if "security_domain" in report:
+                    report["security_domain"] = self.peripheral_map["AES_TOP0"].analysis_facts()
                 if peripheral_controls:
                     execution["peripheral_controls"] = {name: peripheral.control_observation()
                         for name, peripheral in peripheral_controls.items()}

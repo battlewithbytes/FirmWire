@@ -100,6 +100,10 @@ class MTKLoader(firmwire.loader.Loader):
             "type": PurePath, "default": None,
             "help": "Native diagnostics: ROM-hash-bound JSON list of RAM words to observe (no MMIO)",
         },
+        "sej_analysis_state": {
+            "type": PurePath, "default": None,
+            "help": "OPT-IN synthetic SEJ identity file (0600); native analysis only, NOT vendor HUK/attestation",
+        },
         "nv_data": {
             "type": PurePath,
             "help": "A path to MTK vendor data directory",

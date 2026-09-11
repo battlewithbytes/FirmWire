@@ -10,6 +10,15 @@ class AES_TOP0_Periph(PassthroughPeripheral):
     def __init__(self, name, address, size, **kwargs):
         super().__init__(name, address, size, **kwargs)
         self._control_trace = None
+        self._analysis = None
+
+    def enable_analysis(self, key_provider):
+        from .sej_analysis import VirtualSEJ
+        self._analysis = VirtualSEJ(key_provider)
+        self.log.warning("SEJ: synthetic software-key analysis enabled; no vendor HUK or attestation")
+
+    def analysis_facts(self):
+        return self._analysis.facts() if self._analysis is not None else None
 
     def enable_control_observer(self):
         self._control_trace = AESControlTrace()
@@ -24,6 +33,8 @@ class AES_TOP0_Periph(PassthroughPeripheral):
         return value
 
     def _read_unobserved(self, offset, size):
+        if self._analysis is not None:
+            return self._analysis.read(offset, size)
         if offset == 0x8:
             self.log.debug("read AES_TOP0:8")
 
@@ -40,6 +51,8 @@ class AES_TOP0_Periph(PassthroughPeripheral):
     def hw_write(self, offset, size, value):
         if self._control_trace is not None:
             self._control_trace.record("write", offset, size, value)
+        if self._analysis is not None:
+            return self._analysis.write(offset, size, value)
         if offset == 0x0:
             self.log.debug("AES write CON")
         elif offset == 0x4:

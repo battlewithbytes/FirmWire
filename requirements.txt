@@ -1,5 +1,6 @@
 # Orchestration
 avatar2>=1.4.2
+pycryptodome==3.23.0  # Opt-in synthetic MTK SEJ; standard AES primitive
 
 # Interactive kernel mode
 ipykernel==5.5.0
