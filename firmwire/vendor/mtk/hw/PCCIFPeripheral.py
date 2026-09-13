@@ -10,6 +10,7 @@ import shutil
 from enum import Enum, auto
 from . import PassthroughPeripheral
 from .FSD import MTKFSD
+from .ap_properties import APSystemProperties
 
 # Linux: SMEM_USER_CCISM_MCU
 first_ringbuf_size = 721 * 1024
@@ -440,13 +441,16 @@ CCCI_RPC_TX = 33
 
 
 class PCCIF_Periph(PassthroughPeripheral):
-    def __init__(self, name, address, size, pccifid, ringbuffer, **kwargs):
+    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, **kwargs):
         super().__init__(name, address, size, **kwargs)
 
         self.pccifid = pccifid
         self.pccif_version = kwargs.get("version", 1)
         self.rchnum = 0
         self.ringbuffer = ringbuffer.resolve()
+        if ap_properties is not None and not isinstance(ap_properties, APSystemProperties):
+            raise ValueError("ap_properties must be an APSystemProperties instance")
+        self.ap_properties = ap_properties if ap_properties is not None else APSystemProperties()
 
     # 0 CON, 4 BUSY, C TCHNUM, 14 ACK, 100 CHDATA
     def hw_read(self, offset, size):
@@ -657,6 +661,9 @@ class PCCIF_Periph(PassthroughPeripheral):
     def handleRPCPacket(self, ring, buff):
         # rpc_msg_handler
 
+        if len(buff) < 24:
+            raise ValueError("Truncated CCCI RPC header")
+
         # seq_num also has assert_bit
         data0, data1, channel, seq_num, reserved = struct.unpack("<IIHHI", buff[:16])
         op_id, para_num = struct.unpack("<II", buff[16:24])
@@ -664,8 +671,11 @@ class PCCIF_Periph(PassthroughPeripheral):
         offset = 24
         packets = []
         for n in range(para_num):
+            if offset + 4 > len(buff):
+                raise ValueError("Truncated CCCI RPC parameter length")
             pktlen = struct.unpack("<I", buff[offset : offset + 4])[0]
-            assert offset + pktlen + 4 <= len(buff)
+            if offset + pktlen + 4 > len(buff):
+                raise ValueError("Truncated CCCI RPC parameter")
             packets.append(buff[offset + 4 : offset + 4 + pktlen])
             offset = offset + pktlen + 4
             if pktlen % 4:
@@ -674,7 +684,19 @@ class PCCIF_Periph(PassthroughPeripheral):
 
         res_packets = []
 
-        if op_id == IPC_RPC_GET_EINT_ATTR_OP:
+        if op_id == IPC_RPC_QUERY_AP_SYS_PROPERTY:
+            try:
+                name, present, res_packets = self.ap_properties.query(packets)
+            except (ValueError, UnicodeError) as exc:
+                self.log.warning("Invalid AP property RPC: %s", exc)
+                res_packets = [struct.pack("<i", -2)]  # RPC_PARAM_ERROR
+            else:
+                self.log.info(
+                    "AP property RPC name=%r present=%s source=%s value_bytes=%d; "
+                    "standalone service, not live AP IPC",
+                    name, present, self.ap_properties.source, len(res_packets[1]) - 1,
+                )
+        elif op_id == IPC_RPC_GET_EINT_ATTR_OP:
             self.log.debug(
                 "GET_EINT_ATTR "
                 + repr(packets[0])
@@ -697,7 +719,7 @@ class PCCIF_Periph(PassthroughPeripheral):
             res_packets.append(struct.pack("<I", val) + b"\x00" * 64)
         else:
             self.log.error("Unhandled IPC packet %s", buff.hex())
-            self.log.error(data0, data1, channel, seq_num, reserved, op_id, para_num)
+            self.log.error("RPC header: %s", (data0, data1, channel, seq_num, reserved, op_id, para_num))
             self.log.error(packets)
             assert False
 
@@ -705,7 +727,9 @@ class PCCIF_Periph(PassthroughPeripheral):
         for rp in res_packets:
             newbuff = newbuff + struct.pack("<I", len(rp))
             newbuff = newbuff + rp
-        data1 = len(newbuff) + 4
+            newbuff += b"\x00" * (-len(rp) % 4)
+        # CCCI stream framing includes its 16-byte header, operation and count.
+        data1 = len(newbuff) + 24
         channel = CCCI_RPC_TX
         op_id = op_id | RPC_API_RESP_ID
         para_num = len(res_packets)
