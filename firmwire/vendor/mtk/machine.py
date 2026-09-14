@@ -764,6 +764,10 @@ class MT6878Machine(FirmWireEmu):
                 self.avatar.memory_ranges.at, self.panda.physical_memory_read)
             watches = ram_sampler.words
             pc_markers = validate_pc_markers(config)
+            if "v0_trace" in config:
+                from .register_observation import install_v0_trace
+                install_v0_trace(self.panda, config["v0_trace"], report, context_labels,
+                                 self.loader.write_capability_report)
             requested_controls = config.get("peripheral_controls", [])
             if requested_controls not in ([], ["AES_TOP0"]):
                 raise ValueError("Only the explicit AES_TOP0 control observer is supported")
