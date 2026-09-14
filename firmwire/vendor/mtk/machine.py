@@ -779,10 +779,22 @@ class MT6878Machine(FirmWireEmu):
             observe_exceptions = config.get("cpu_exceptions", False)
             if type(observe_exceptions) is not bool:
                 raise ValueError("cpu_exceptions observer option must be boolean")
+            if "exception_stack" in config and not observe_exceptions:
+                raise ValueError("exception_stack requires cpu_exceptions")
             if observe_exceptions:
-                from .exception_observation import install_exception_observer
+                from .exception_observation import install_exception_observer, ExceptionStackCapture
+                stack_capture = None
+                if "exception_stack" in config:
+                    from .observation import validate_ram_observer
+                    def validate_stack_words(words):
+                        return validate_ram_observer(dict(config, words=words), report["rom_sha256"],
+                                                     self.avatar.memory_ranges.at)
+                    stack_capture = ExceptionStackCapture(config["exception_stack"],
+                        self.panda.libpanda.panda_current_sp_external, validate_stack_words,
+                        self.panda.physical_memory_read)
+                    report["ram_observer"]["exception_stack"] = config["exception_stack"]
                 exception_trace = install_exception_observer(self.panda, report, context_labels,
-                                                              persist_exception_evidence)
+                                                              persist_exception_evidence, stack_capture)
 
         @self.panda.cb_after_block_exec
         def cockpit_after_block(cpu, tb, exit_code):

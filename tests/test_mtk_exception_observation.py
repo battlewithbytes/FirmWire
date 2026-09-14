@@ -11,6 +11,43 @@ spec.loader.exec_module(module)
 
 
 class ExceptionObservationTests(unittest.TestCase):
+    def test_stack_capture_is_selected_bounded_and_non_mutating(self):
+        sp, validate, read = Mock(return_value=0x1000), Mock(), Mock(return_value=b"\x07\0\0\0" * 2)
+        capture = module.ExceptionStackCapture({"pcs": [0x2000], "exception_index": 18, "words": 2},
+                                               sp, validate, read)
+        self.assertIsNone(capture.sample("cpu", 20, 0x2000))
+        self.assertIsNone(capture.sample("cpu", 18, 0x2002))
+        sp.assert_not_called()
+        for _ in range(4):
+            self.assertEqual(capture.sample("cpu", 18, 0x2000)["words"], [7, 7])
+        self.assertIsNone(capture.sample("cpu", 18, 0x2000))
+        self.assertEqual(read.call_count, 4)
+        validate.assert_called_with([0x1000, 0x1004])
+        read.assert_called_with(0x1000, 8)
+
+    def test_stack_validation_precedes_reads_and_errors_are_evidence(self):
+        read = Mock()
+        capture = module.ExceptionStackCapture({"pcs": [2], "exception_index": 18, "words": 1},
+            lambda _: 0x1000, Mock(side_effect=ValueError("MMIO forbidden")), read)
+        self.assertIn("MMIO forbidden", capture.sample("cpu", 18, 2)["error"])
+        read.assert_not_called()
+        capture = module.ExceptionStackCapture({"pcs": [2], "exception_index": 18, "words": 1},
+            lambda _: 0x1000, Mock(), Mock(return_value=b""))
+        self.assertIn("Short stack read", capture.sample("cpu", 18, 2)["error"])
+
+    def test_stack_config_and_snapshot_safety(self):
+        good = {"pcs": [2], "exception_index": 18, "words": 1}
+        for bad in ({}, dict(good, words=True), dict(good, words=17), dict(good, pcs=[3]),
+                    dict(good, pcs=[2, 2]), dict(good, exception_index=True), dict(good, extra=1)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                module.ExceptionStackCapture(bad, Mock(), Mock(), Mock())
+        trace = module.ExceptionTrace()
+        stack = {"words": [7]}
+        trace.record(18, 2, "cpu", 1, [], stack)
+        stack["words"][0] = 8
+        self.assertEqual(trace.snapshot()["first"][0]["stack"]["words"], [7])
+        self.assertTrue(trace.snapshot()["registers_or_payloads_recorded"])
+
     def test_trace_is_bounded_and_preserves_exception_indices(self):
         trace = module.ExceptionTrace()
         for i in range(1000):
@@ -22,6 +59,14 @@ class ExceptionObservationTests(unittest.TestCase):
         self.assertEqual(len(snapshot["counts"]), 65)
         self.assertEqual(len(snapshot["recent"][0]["preceding_pcs"]), 16)
         self.assertFalse(snapshot["registers_or_payloads_recorded"])
+
+    def test_capture_disclosure_survives_eviction_from_recent_events(self):
+        trace = module.ExceptionTrace()
+        for i in range(100):
+            trace.record(18, 2, "cpu", i, [], {"words": [7]} if i == 40 else None)
+        snapshot = trace.snapshot()
+        self.assertTrue(snapshot["registers_or_payloads_recorded"])
+        self.assertTrue(all("stack" not in event for event in snapshot["first"] + snapshot["recent"]))
 
     def test_snapshot_does_not_alias_live_records(self):
         trace = module.ExceptionTrace()
