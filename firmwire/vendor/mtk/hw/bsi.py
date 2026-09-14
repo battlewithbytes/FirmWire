@@ -18,8 +18,15 @@ class SerialCommand:
     lengths: tuple
 
 
+@dataclass(frozen=True)
+class ReadCompletionLayout:
+    status_offset: int
+    clear_offset: int
+    bank_ready_bits: tuple
+
+
 class BsiImmediateControl:
-    def __init__(self, size=0x9000, bank_offsets=(0x1000, 0x1100), mode="observe"):
+    def __init__(self, size=0x9000, bank_offsets=(0x1000, 0x1100), mode="observe", read_layout=None):
         if mode not in ("observe", "pending"):
             raise ValueError("Unknown BSI analysis mode")
         if type(size) is not int or not 0x20 <= size <= 0x100000:
@@ -29,12 +36,26 @@ class BsiImmediateControl:
                 or any(abs(a-b) < 0x20 for i, a in enumerate(bank_offsets) for b in bank_offsets[i+1:])):
             raise ValueError("Invalid or overlapping BSI banks")
         self.size, self.banks, self.mode = size, tuple(bank_offsets), mode
+        if read_layout is not None:
+            if not isinstance(read_layout, ReadCompletionLayout):
+                raise ValueError("Expected an explicit BSI read-completion layout")
+            offsets = (read_layout.status_offset, read_layout.clear_offset)
+            bits = read_layout.bank_ready_bits
+            if (len(bits) != len(self.banks) or len(set(bits)) != len(bits)
+                    or any(type(bit) is not int or not 0 <= bit < 32 for bit in bits)
+                    or offsets[0] == offsets[1]
+                    or any(type(off) is not int or off < 0 or off % 4 or off + 4 > size
+                           or any(b <= off < b + 0x20 for b in self.banks) for off in offsets)):
+                raise ValueError("Invalid or overlapping BSI read-completion layout")
+        self.read_layout = (ReadCompletionLayout(offsets[0], offsets[1], tuple(bits))
+                            if read_layout is not None else None)
         self.reset()
 
     def reset(self):
         self.storage = bytearray(self.size)
         self.pending = {}
         self.sequence = self.completed = self.busy_rejections = 0
+        self.completed_reads = self.read_status = 0
         self.events = []
 
     def _access(self, offset, size):
@@ -54,6 +75,10 @@ class BsiImmediateControl:
         word = offset & ~3
         value = self._word(word)
         if self.mode == "pending":
+            if self.read_layout and word == self.read_layout.status_offset:
+                value = self.read_status
+            elif self.read_layout and word == self.read_layout.clear_offset:
+                value = 0  # write-one-to-clear command register
             for bank, base in enumerate(self.banks):
                 if word == base + 8:
                     value = int(bank not in self.pending)
@@ -63,6 +88,17 @@ class BsiImmediateControl:
         self._access(offset, size)
         if type(value) is not int or not 0 <= value < (1 << (size*8)):
             raise ValueError("BSI value does not fit access width")
+        if self.mode == "pending" and self.read_layout:
+            word = offset & ~3
+            if word == self.read_layout.status_offset:
+                self._record("readonly_write_ignored", offset=offset)
+                return True
+            if word == self.read_layout.clear_offset:
+                if size != 4:
+                    raise NotImplementedError("Partial BSI read-status clear needs a reviewed ABI")
+                self.read_status &= ~value
+                self._record("read_status_cleared", mask=value)
+                return True
         bank = next((i for i, b in enumerate(self.banks) if b <= offset < b + 0x20), None)
         relative = None if bank is None else (offset - self.banks[bank]) & ~3
         if self.mode == "pending" and relative in (8, 12, 16):
@@ -93,7 +129,7 @@ class BsiImmediateControl:
     def complete_write(self, bank, sequence):
         """Explicit future backend boundary; NEVER called by guest polling.
 
-        Reads and extended transfers need their own reviewed completion ABI.
+        Reads use complete_read with an explicitly supplied payload and layout.
         A backend must call this only after actually handling the transaction.
         """
         if self.mode != "pending" or bank not in self.pending:
@@ -109,6 +145,35 @@ class BsiImmediateControl:
         self.storage[self.banks[bank]] &= ~1
         self._record("backend_write_complete", bank=bank, sequence=sequence)
 
+    def complete_read(self, bank, sequence, value):
+        """Publish an explicit backend's 36-bit result; never generate RF data.
+
+        Unread results cannot be overwritten. Extended transfers and partial
+        status-clear writes remain unsupported. No poll or timer calls this.
+        """
+        if self.read_layout is None:
+            raise NotImplementedError("No BSI read-completion ABI selected")
+        if self.mode != "pending" or bank not in self.pending:
+            raise ValueError("No pending BSI command")
+        command = self.pending[bank]
+        if command.sequence != sequence:
+            raise ValueError("Stale BSI completion")
+        if not command.read or command.extended:
+            raise NotImplementedError("Expected a non-extended BSI read")
+        if type(value) is not int or not 0 <= value < 1 << 36:
+            raise ValueError("BSI read result must fit 36 bits")
+        bit = 1 << self.read_layout.bank_ready_bits[bank]
+        if self.read_status & bit:
+            raise ValueError("Previous BSI read result has not been acknowledged")
+        base = self.banks[bank]
+        self.storage[base+12:base+16] = (value & 0xffffffff).to_bytes(4, "little")
+        self.storage[base+16:base+20] = (value >> 32).to_bytes(4, "little")
+        self.read_status |= bit
+        del self.pending[bank]
+        self.storage[base] &= ~1
+        self.completed_reads += 1
+        self._record("backend_read_complete", bank=bank, sequence=sequence, value=value)
+
     def facts(self):
         return {"abi": "mt6768-bsi-immediate/v1", "mode": self.mode,
             "analysis_only": True, "firmware_boot_verified": False,
@@ -116,6 +181,8 @@ class BsiImmediateControl:
             "reset_silicon_verified": False, "backend_connected": False,
             "rf_emulated": False, "dsp_emulated": False,
             "commands": self.sequence, "completed_writes": self.completed,
+            "completed_reads": self.completed_reads, "read_status": self.read_status,
+            "read_completion_layout": asdict(self.read_layout) if self.read_layout else None,
             "busy_rejections": self.busy_rejections,
             "pending": [asdict(c) for c in self.pending.values()],
             "events": list(self.events), "unmodelled_registers": "RAM-compatible storage"}

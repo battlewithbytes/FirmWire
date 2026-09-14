@@ -103,6 +103,78 @@ class BsiTests(unittest.TestCase):
             with self.assertRaises(ValueError): model.read(offset, size)
         with self.assertRaises(ValueError): model.write(0, 1, 256)
 
+    def read_model(self):
+        return bsi.BsiImmediateControl(size=0x1000, bank_offsets=(0x100, 0x200, 0x300),
+            mode="pending", read_layout=bsi.ReadCompletionLayout(0x800, 0x804, (1, 7, 13)))
+
+    def test_explicit_read_completion_and_selective_acknowledgement(self):
+        model = self.read_model()
+        for bank, value in enumerate((0x123456789, 0xabcdef012, 0xf98765432)):
+            base = model.banks[bank]
+            model.write(base, 4, 3)
+            for _ in range(100): self.assertEqual(model.read(base+8, 4), 0)
+            model.complete_read(bank, bank+1, value)
+            self.assertEqual(model.read(base+12, 4), value & 0xffffffff)
+            self.assertEqual(model.read(base+16, 4), value >> 32)
+            self.assertEqual(model.read(base+8, 4), 1)
+        self.assertEqual(model.read(0x800, 4), (1 << 1) | (1 << 7) | (1 << 13))
+        model.write(0x804, 4, 1 << 7)
+        self.assertEqual(model.read(0x800, 4), (1 << 1) | (1 << 13))
+        model.write(0x800, 4, 0)
+        self.assertEqual(model.read(0x800, 4), (1 << 1) | (1 << 13))
+        model.write(0x804, 4, 0xffffffff)
+        self.assertEqual(model.read(0x800, 4), 0)
+        self.assertEqual(model.read(0x804, 4), 0)
+        self.assertEqual(model.facts()["completed_reads"], 3)
+
+    def test_read_completion_cannot_invent_or_replace_unread_results(self):
+        model = self.read_model()
+        model.write(0x100, 4, 3)
+        for sequence, value in ((0, 12), (1, -1), (1, 1 << 36), (1, True)):
+            with self.assertRaises(ValueError): model.complete_read(0, sequence, value)
+            self.assertEqual(model.read(0x800, 4), 0)
+        model.complete_read(0, 1, 0xdeadbeef)
+        model.write(0x100, 4, 3)
+        with self.assertRaises(ValueError): model.complete_read(0, 2, 0x1234)
+        self.assertEqual(model.read(0x10c, 4), 0xdeadbeef)
+        model.write(0x804, 4, 2)
+        model.complete_read(0, 2, 0x1234)
+        self.assertEqual(model.read(0x10c, 4), 0x1234)
+
+    def test_missing_layout_extended_and_partial_clear_refused(self):
+        model = bsi.BsiImmediateControl(mode="pending")
+        model.write(0x1000, 4, 3)
+        with self.assertRaises(NotImplementedError): model.complete_read(0, 1, 3)
+        for command in (1, 7):
+            model = self.read_model()
+            model.write(0x100, 4, command)
+            with self.assertRaises(NotImplementedError): model.complete_read(0, 1, 3)
+        with self.assertRaises(NotImplementedError): model.write(0x804, 1, 2)
+
+    def test_read_layout_validation_and_reset_snapshot(self):
+        for layout in (bsi.ReadCompletionLayout(0x1008, 0x1200, (0, 2)),
+                       bsi.ReadCompletionLayout(0x1204, 0x1204, (0, 2)),
+                       bsi.ReadCompletionLayout(0x1204, 0x1200, (2, 2)),
+                       bsi.ReadCompletionLayout(0x1204, 0x1200, (0, 32))):
+            with self.assertRaises(ValueError): bsi.BsiImmediateControl(read_layout=layout)
+        model = self.read_model()
+        model.write(0x100, 4, 3)
+        model.complete_read(0, 1, 0xabcdef)
+        restored = pickle.loads(pickle.dumps(model))
+        self.assertEqual(restored.facts(), model.facts())
+        restored.reset()
+        self.assertEqual((restored.read(0x800, 4), restored.read(0x10c, 4)), (0, 0))
+        bits = [0, 2]
+        isolated = bsi.BsiImmediateControl(read_layout=bsi.ReadCompletionLayout(0x1204, 0x1200, bits))
+        bits[0] = 5
+        self.assertEqual(isolated.read_layout.bank_ready_bits, (0, 2))
+
+    def test_observe_read_layout_does_not_change_ram(self):
+        model = bsi.BsiImmediateControl(read_layout=bsi.ReadCompletionLayout(0x1204, 0x1200, (0, 2)))
+        for offset in (0x1200, 0x1204):
+            model.write(offset, 4, 0x12345678)
+            self.assertEqual(model.read(offset, 4), 0x12345678)
+
 
 class BsiAdapterTests(unittest.TestCase):
     @classmethod

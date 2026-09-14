@@ -1,12 +1,13 @@
 """Relocatable adapter for explicit digital BSI observation/pending modes."""
 from firmwire.hw.peripheral import PassthroughPeripheral
-from .bsi import BsiImmediateControl
+from .bsi import BsiImmediateControl, ReadCompletionLayout
 
 
 class BSIImmediatePeripheral(PassthroughPeripheral):
     def __init__(self, name, address, size, bsi_mode="observe", **kwargs):
         super().__init__(name, address, size, **kwargs)
-        self.control = BsiImmediateControl(size=size, mode=bsi_mode)
+        self.control = BsiImmediateControl(size=size, mode=bsi_mode,
+            read_layout=ReadCompletionLayout(0x1204, 0x1200, (0, 2)))
         self.log.warning("BSI %s analysis: no RF/DSP backend, no automatic completion", bsi_mode)
 
     def hw_read(self, offset, size):
