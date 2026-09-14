@@ -754,6 +754,9 @@ class MT6878Machine(FirmWireEmu):
             # Exceptions may precede an MMIO-thread failure by only a few
             # blocks. Never present the prior periodic RAM sample as current.
             sample_ram()
+            if peripheral_controls:
+                report["execution"]["peripheral_controls"] = {
+                    name: device.control_observation() for name, device in peripheral_controls.items()}
             self.loader.write_capability_report()
 
         observe = self.loader.loader_args.get("observe_ram")
@@ -769,8 +772,10 @@ class MT6878Machine(FirmWireEmu):
                 install_v0_trace(self.panda, config["v0_trace"], report, context_labels,
                                  self.loader.write_capability_report)
             requested_controls = config.get("peripheral_controls", [])
-            if requested_controls not in ([], ["AES_TOP0"]):
-                raise ValueError("Only the explicit AES_TOP0 control observer is supported")
+            if (not isinstance(requested_controls, list) or len(requested_controls) > 2
+                    or any(name not in ("AES_TOP0", "MODEML1_AO_BSI_MM_2") for name in requested_controls)
+                    or len(set(requested_controls)) != len(requested_controls)):
+                raise ValueError("Only explicit AES_TOP0/BSI control observers are supported")
             for name in requested_controls:
                 peripheral = self.peripheral_map.get(name)
                 if peripheral is None or not hasattr(peripheral, "enable_control_observer"):

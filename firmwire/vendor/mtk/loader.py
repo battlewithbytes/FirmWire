@@ -29,6 +29,7 @@ from .resolution import Resolver
 from .machine import MT6878Machine
 from .hw import *
 from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
+from .hw.BSIPeripheral import BSIImmediatePeripheral
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
 
 MAGIC = 0x58881688
@@ -77,6 +78,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "bsi": {
+            "type": str, "choices": ["disabled", "mt6768-observe", "mt6768-pending"], "default": "disabled",
+            "help": "OPT-IN reviewed MT6768 BSI register ABI; observe RAM or accept pending commands; no RF/DSP backend",
+        },
         "mml2_mmu": {
             "type": str, "choices": ["disabled", "93xx-control"], "default": "disabled",
             "help": "OPT-IN reviewed 93xx MML2 MCU MMU control ABI; native analysis only, no translation/DMA",
@@ -458,6 +463,11 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        bsi_mode = self.loader_args.get("bsi", "disabled")
+        if bsi_mode not in ("disabled", "mt6768-observe", "mt6768-pending"):
+            raise ValueError("Unsupported BSI ABI")
+        if bsi_mode != "disabled" and self.boot_mode != "native":
+            raise ValueError("BSI analysis requires native boot mode")
         mmu_abi = self.loader_args.get("mml2_mmu", "disabled")
         if mmu_abi not in ("disabled", "93xx-control"):
             raise ValueError("Unsupported MML2 MMU ABI")
@@ -697,7 +707,9 @@ class MTKLoader(firmwire.loader.Loader):
             0xA6140000, 0x1000, name="BASE_MADDR_MODEML1_AO_BSI_MM", permissions="rw-"
         )
         self.add_memory_range(
-            0xA6160000, 0x9000, name="MODEML1_AO_BSI_MM_2", permissions="rw-"
+            0xA6160000, 0x9000, name="MODEML1_AO_BSI_MM_2", permissions="rw-",
+            **({"emulate": BSIImmediatePeripheral, "bsi_mode": bsi_mode.split("-", 1)[1]}
+               if bsi_mode != "disabled" else {})
         )
         self.add_memory_range(
             0xA6170000, 0x3000, name="MODEML1_AO_BSI_MM_3", permissions="rw-"
