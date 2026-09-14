@@ -836,6 +836,9 @@ class MT6878Machine(FirmWireEmu):
                     execution["cpu_exceptions"] = exception_trace.snapshot()
                 if "security_domain" in report:
                     report["security_domain"] = self.peripheral_map["AES_TOP0"].analysis_facts()
+                mmu = self.peripheral_map.get("MDCORESYS_MML2_MCU_MMU_MMU")
+                if mmu is not None and hasattr(mmu, "control_facts"):
+                    execution["mml2_mmu"] = mmu.control_facts()
                 if peripheral_controls:
                     execution["peripheral_controls"] = {name: peripheral.control_observation()
                         for name, peripheral in peripheral_controls.items()}

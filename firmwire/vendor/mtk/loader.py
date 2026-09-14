@@ -28,6 +28,7 @@ from .pattern import PATTERNS
 from .resolution import Resolver
 from .machine import MT6878Machine
 from .hw import *
+from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
 
 MAGIC = 0x58881688
@@ -76,6 +77,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "mml2_mmu": {
+            "type": str, "choices": ["disabled", "93xx-control"], "default": "disabled",
+            "help": "OPT-IN reviewed 93xx MML2 MCU MMU control ABI; native analysis only, no translation/DMA",
+        },
         "cpu_topology": {
             "type": PurePath, "default": None,
             "help": "Experimental ROM-bound native MIPS MT topology profile; requires matching development PANDA",
@@ -453,6 +458,11 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        mmu_abi = self.loader_args.get("mml2_mmu", "disabled")
+        if mmu_abi not in ("disabled", "93xx-control"):
+            raise ValueError("Unsupported MML2 MMU ABI")
+        if mmu_abi != "disabled" and self.boot_mode != "native":
+            raise ValueError("MML2 control-only analysis requires native boot mode")
         # peripherals
         self.add_memory_range(
             0x1F000000, 0x8000, name="GCR", emulate=GCR_Periph, permissions="rw-"
@@ -568,7 +578,8 @@ class MTKLoader(firmwire.loader.Loader):
             0xA0210000, 0x1000, name="MDMCU_IA_PDA_MON", permissions="rw-"
         )
         self.add_memory_range(
-            0xA0300000, 0x1000, name="MDCORESYS_MML2_MCU_MMU_MMU", permissions="rw-"
+            0xA0300000, 0x1000, name="MDCORESYS_MML2_MCU_MMU_MMU", permissions="rw-",
+            **({"emulate": MML2MMU93Peripheral} if mmu_abi == "93xx-control" else {})
         )
         self.add_memory_range(
             0xA0301000, 0x1000, name="MDCORESYS_MML2_MCU_MMU_VRB", permissions="rw-"
