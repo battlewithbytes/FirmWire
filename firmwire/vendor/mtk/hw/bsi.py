@@ -26,7 +26,8 @@ class ReadCompletionLayout:
 
 
 class BsiImmediateControl:
-    def __init__(self, size=0x9000, bank_offsets=(0x1000, 0x1100), mode="observe", read_layout=None):
+    def __init__(self, size=0x9000, bank_offsets=(0x1000, 0x1100), mode="observe", read_layout=None,
+                 serial_bus=None):
         if mode not in ("observe", "pending"):
             raise ValueError("Unknown BSI analysis mode")
         if type(size) is not int or not 0x20 <= size <= 0x100000:
@@ -49,6 +50,9 @@ class BsiImmediateControl:
                 raise ValueError("Invalid or overlapping BSI read-completion layout")
         self.read_layout = (ReadCompletionLayout(offsets[0], offsets[1], tuple(bits))
                             if read_layout is not None else None)
+        if serial_bus is not None and mode != "pending":
+            raise ValueError("Serial backend requires pending mode")
+        self.serial_bus = serial_bus
         self.reset()
 
     def reset(self):
@@ -57,6 +61,8 @@ class BsiImmediateControl:
         self.sequence = self.completed = self.busy_rejections = 0
         self.completed_reads = self.read_status = 0
         self.events = []
+        if self.serial_bus is not None:
+            self.serial_bus.reset()
 
     def _access(self, offset, size):
         if (type(offset) is not int or type(size) is not int or size not in (1, 2, 4)
@@ -124,7 +130,31 @@ class BsiImmediateControl:
             self._record("command", **asdict(command))
             if self.mode == "pending":
                 self.pending[bank] = command
+                self._dispatch(command)
         return True
+
+    def _dispatch(self, command):
+        if self.serial_bus is None:
+            return
+        # Never consume another target read when the controller cannot publish
+        # it. Polling does not retry dispatch or mutate either endpoint.
+        if command.extended or (command.read and (self.read_layout is None or
+                self.read_status & (1 << self.read_layout.bank_ready_bits[command.bank]))):
+            self._record("backend_unresolved", bank=command.bank, sequence=command.sequence,
+                         reason="unsupported-transfer-or-unacknowledged-read")
+            return
+        result = self.serial_bus.exchange(command)
+        if result.status == "unresolved":
+            if result.value is not None:
+                raise ValueError("Unresolved target result must not supply data")
+            self._record("backend_unresolved", bank=command.bank, sequence=command.sequence,
+                         reason=result.reason)
+        elif result.status == "write-complete" and not command.read and result.value is None:
+            self.complete_write(command.bank, command.sequence)
+        elif result.status == "read-complete" and command.read:
+            self.complete_read(command.bank, command.sequence, result.value)
+        else:
+            raise ValueError("Serial backend returned an incompatible completion")
 
     def complete_write(self, bank, sequence):
         """Explicit future backend boundary; NEVER called by guest polling.
@@ -178,7 +208,8 @@ class BsiImmediateControl:
         return {"abi": "mt6768-bsi-immediate/v1", "mode": self.mode,
             "analysis_only": True, "firmware_boot_verified": False,
             "reset_policy": "zero-RAM" if self.mode == "observe" else "empty-controller-ready",
-            "reset_silicon_verified": False, "backend_connected": False,
+            "reset_silicon_verified": False, "backend_connected": self.serial_bus is not None,
+            "serial_targets": self.serial_bus.facts() if self.serial_bus is not None else {},
             "rf_emulated": False, "dsp_emulated": False,
             "commands": self.sequence, "completed_writes": self.completed,
             "completed_reads": self.completed_reads, "read_status": self.read_status,

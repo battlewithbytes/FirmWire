@@ -735,6 +735,8 @@ class MT6878Machine(FirmWireEmu):
         watches = []
         pc_markers = {}
         peripheral_controls = {}
+        clocked_controls = [p for p in self.peripheral_map.values() if getattr(p, "hwpor", None) is not None
+                            and hasattr(p, "advance_guest_blocks")]
         exception_trace = None
         ram_sampler = None
 
@@ -810,6 +812,9 @@ class MT6878Machine(FirmWireEmu):
             execution = report["execution"]
             execution["completed_blocks"] += 1
             count = execution["completed_blocks"]
+            if clocked_controls and count % 1024 == 0:
+                for peripheral in clocked_controls:
+                    peripheral.advance_guest_blocks(1024)
             pc = int(tb.pc)
             # Even legacy CPUState CFFI field offsets can be stale. Compare
             # opaque callback pointers without dereferencing either CPU struct.
