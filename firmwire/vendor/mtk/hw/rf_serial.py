@@ -9,6 +9,21 @@ import copy
 import re
 
 
+def validate_reset_registers(registers):
+    """Explicit software storage seeds, never inferred silicon reset values."""
+    if not isinstance(registers, dict) or len(registers) > 64:
+        raise ValueError("Software reset state must be a bounded register map")
+    for address, entry in registers.items():
+        if (not isinstance(address, str) or not re.fullmatch(r"[1-9][0-9]{0,3}", address)
+                or not 1 <= int(address) <= 0x3ff
+                or not isinstance(entry, dict) or set(entry) != {"value", "source", "reason"}
+                or type(entry["value"]) is not int or not 0 <= entry["value"] <= 0xfffff
+                or entry["source"] != "analysis-assumption"
+                or not isinstance(entry["reason"], str) or not entry["reason"].strip()):
+            raise ValueError("Reset register requires a canonical address, 20-bit value and explicit assumption")
+    return copy.deepcopy(registers)
+
+
 def validate_software_rf_profile(config, rom_sha256):
     """An explicit, ROM-bound experiment choice, never extracted silicon data."""
     if (not isinstance(config, dict) or config.get("schema") != "firmwire.software-rf/v1"
@@ -23,9 +38,11 @@ def validate_software_rf_profile(config, rom_sha256):
         raise ValueError("Software RF profile needs explicit ports")
     for port, identity in ports.items():
         if (not isinstance(port, str) or not re.fullmatch(r"[0-9]|1[0-5]", port)
-                or not isinstance(identity, dict) or set(identity) != {"chip_id", "eco"}
-                or any(type(identity[k]) is not int or not 0 <= identity[k] <= 15 for k in identity)):
+                or not isinstance(identity, dict)
+                or not {"chip_id", "eco"} <= set(identity) <= {"chip_id", "eco", "reset_registers"}
+                or any(type(identity[k]) is not int or not 0 <= identity[k] <= 15 for k in ("chip_id", "eco"))):
             raise ValueError("Invalid software RF port/identity/ECO")
+        validate_reset_registers(identity.get("reset_registers", {}))
     return copy.deepcopy(config)
 
 
@@ -125,17 +142,23 @@ class SoftwareMt6177Target(SerialTarget):
     """Opt-in register-storage analysis substitute, NOT a silicon model.
 
     CW0 chip/ECO are caller assumptions. Only the observed CW0 reset command is
-    accepted; other registers remember actual guest writes. Unwritten reads stay
-    unresolved. No calibration-done bits or analog results are synthesized.
+    accepted; other registers remember actual guest writes or explicitly
+    declared software reset seeds. Other reads stay unresolved. No calibration
+    completion or analog result is computed by this storage model.
     """
-    def __init__(self, chip_id, eco):
+    def __init__(self, chip_id, eco, reset_registers=None):
         if any(type(v) is not int or not 0 <= v <= 15 for v in (chip_id, eco)):
             raise ValueError("Explicit four-bit software RF identity/ECO required")
         self.chip_id, self.eco = chip_id, eco
+        self.reset_registers = validate_reset_registers({} if reset_registers is None else reset_registers)
         self.reset()
 
+    def _reset_storage(self):
+        self.registers = {int(address): entry["value"] for address, entry in self.reset_registers.items()}
+        self.written = set()
+
     def reset(self):
-        self.registers = {}
+        self._reset_storage()
         self.writes = self.reads = self.resets = 0
         self.history = []
 
@@ -154,15 +177,18 @@ class SoftwareMt6177Target(SerialTarget):
             else:
                 return SerialResult("unresolved", reason="software-rf-unwritten-register-%x" % cw.address)
             self.reads += 1
-            result = SerialResult("read-complete", value, "software-register-storage-analysis")
+            reason = ("software-reset-profile-assumption" if cw.address != 0 and cw.address not in self.written
+                      else "software-register-storage-analysis")
+            result = SerialResult("read-complete", value, reason)
         else:
             if cw.address == 0:
                 if cw.payload != 0x80000:
                     return SerialResult("unresolved", reason="software-rf-unreviewed-cw0-write")
-                self.registers.clear()
+                self._reset_storage()
                 self.resets += 1
             else:
                 self.registers[cw.address] = cw.payload
+                self.written.add(cw.address)
             self.writes += 1
             value = cw.payload
             result = SerialResult("write-complete", reason="software-register-storage-analysis")
@@ -175,6 +201,7 @@ class SoftwareMt6177Target(SerialTarget):
                 "silicon_verified": False, "rf_emulated": False, "calibration_emulated": False,
                 "identity_source": "explicit-software-profile-assumption",
                 "chip_id": self.chip_id, "eco": self.eco, "cw0": self.chip_id | self.eco << 4,
-                "unknown_reads": "unresolved-not-zero-filled", "registers_written": len(self.registers),
+                "unknown_reads": "unresolved-not-zero-filled", "registers_written": len(self.written),
+                "reset_registers": copy.deepcopy(self.reset_registers),
                 "writes": self.writes, "reads": self.reads, "resets": self.resets,
                 "recent_transactions": list(self.history)}

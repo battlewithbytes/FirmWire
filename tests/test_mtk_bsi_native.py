@@ -45,6 +45,14 @@ def child(directory, read_completion=False, capture=False, software=None):
             sw $v0, 0x1000($zero)
             li $t1, 1
             sw $t1, 0x1200($t0)
+            li $t1, 0x555
+            sw $t1, 0x1004($t0)
+            li $t1, 3
+            sw $t1, 0x1000($t0)
+            lw $v0, 0x100c($t0)
+            sw $v0, 0x1010($zero)
+            li $t1, 1
+            sw $t1, 0x1200($t0)
             li $t1, 4
             sw $t1, 0x4000($t0)
             li $t1, 75
@@ -94,6 +102,10 @@ def child(directory, read_completion=False, capture=False, software=None):
     profile = None if software is None else dict(schema="firmwire.software-rf/v1", name="synthetic",
         analysis_only=True, assumptions="native test values only", rom_sha256="a"*64,
         ports={"0": {"chip_id": software[0], "eco": software[1]}})
+    if software:
+        profile["ports"]["0"]["reset_registers"] = {"341": {
+            "value": 0x34567 if software[0] == 8 else 0xabcde,
+            "source": "analysis-assumption", "reason": "synthetic native storage test"}}
     devices = {base: BSIImmediatePeripheral("bank-%x" % base, base, 0x9000,
                bsi_mode="software-rf" if software else "capture-writes" if capture else "pending",
                rf_profile=profile, firmwire_machine=machine) for base in (0x400000, 0x600000)}
@@ -131,8 +143,8 @@ def child(directory, read_completion=False, capture=False, software=None):
         output = root / "result.json"
         if not output.exists():
             report = {"exception_index": index, "pc": int(panda.libpanda.panda_current_pc(cpu)),
-                      "guest_words": list(struct.unpack("<5I" if read_completion else "<4I",
-                          panda.physical_memory_read(0x1000, 20 if read_completion else 16))),
+                      "guest_words": list(struct.unpack("<5I" if read_completion or software else "<4I",
+                          panda.physical_memory_read(0x1000, 20 if read_completion or software else 16))),
                       "devices": [device.control_observation() for device in devices.values()]}
             (root / "result.tmp").write_text(json.dumps(report))
             (root / "result.tmp").replace(output)
@@ -149,10 +161,11 @@ class NativeBsiTests(unittest.TestCase):
         for mode, identity in (("--child-software", 8), ("--child-software-coful", 0x2c)):
             report = self.run_child(mode)
             self.assertEqual(report["exception_index"], 18)
-            self.assertEqual(report["guest_words"], [identity, 0x30, 0x12345, 0])
+            self.assertEqual(report["guest_words"], [identity, 0x30, 0x12345, 0,
+                                                   0x34567 if identity == 8 else 0xabcde])
             a, b = report["devices"]
             self.assertEqual(a["hwpor"]["completed_writes"], 1)
-            self.assertEqual(a["serial_targets"]["0"]["reads"], 2)
+            self.assertEqual(a["serial_targets"]["0"]["reads"], 3)
             self.assertEqual(b["hwpor"]["completed_writes"], 0)
             self.assertFalse(a["serial_targets"]["0"]["silicon_verified"])
     @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_BSI") == "1",

@@ -18,6 +18,63 @@ bsi = load("rf_bsi_unit", "bsi.py")
 
 
 class RFSerialTests(unittest.TestCase):
+    def seed(self, value):
+        return {"367": {"value": value, "source": "analysis-assumption",
+                        "reason": "synthetic backup/restore test; not a silicon reset value"}}
+
+    def test_explicit_reset_state_backup_restore_and_sor_with_distinct_values(self):
+        for value in (0, 0x12345, 0xabcde, 0xfffff):
+            seeds = self.seed(value)
+            target = rf.SoftwareMt6177Target(8, 0, seeds)
+            seeds["367"]["value"] ^= 1  # caller cannot mutate the model
+            m = self.model({5: target})
+            for reset in (lambda: self.issue(m, 0x80000), m.reset):
+                reset()
+                self.assertEqual(target.facts()["registers_written"], 0)
+                self.issue(m, 0x56f, read=True)
+                backup = m.read(0x10c, 4)
+                self.assertEqual(backup, value)
+                m.write(0x404, 4, 2)
+                self.issue(m, (367 << 20) | (value ^ 0xfffff))
+                self.issue(m, (367 << 20) | backup)
+                self.issue(m, 0x56f, read=True)
+                self.assertEqual(m.read(0x10c, 4), value)
+                m.write(0x404, 4, 2)
+            # Calibration values were NOT granted by configuring storage.
+            for register in (9, 10, 11):
+                self.issue(m, 0x400 | register, read=True)
+                self.assertEqual(m.read(0x108, 4), 0)
+                m.reset()
+            snapshot = target.facts()
+            snapshot["reset_registers"]["367"]["value"] ^= 1
+            self.assertEqual(target.facts()["reset_registers"], self.seed(value))
+            self.assertFalse(target.facts()["calibration_emulated"])
+
+    def test_reset_seeds_are_validated_at_profile_and_constructor_boundaries(self):
+        valid = self.seed(42)["367"]
+        bad_maps = [None, [], {"0": valid}, {"01": valid}, {"0x16f": valid},
+                    {"1024": valid}, {1: valid}, {str(i): valid for i in range(1, 66)}]
+        for key, value in (("value", True), ("value", -1), ("value", 1 << 20),
+                           ("source", "silicon"), ("reason", " "), ("extra", 0)):
+            bad_maps.append({"367": {**valid, key: value}})
+        profile = dict(schema="firmwire.software-rf/v1", name="synthetic", analysis_only=True,
+                       assumptions="synthetic test", rom_sha256="a"*64,
+                       ports={"0": {"chip_id": 8, "eco": 0}})
+        for seeds in bad_maps:
+            profile["ports"]["0"]["reset_registers"] = seeds
+            with self.assertRaises(ValueError): rf.validate_software_rf_profile(profile, "a"*64)
+            if seeds is not None:  # omitted constructor argument remains backwards compatible
+                with self.assertRaises(ValueError): rf.SoftwareMt6177Target(8, 0, seeds)
+
+    def test_reset_state_is_per_target_and_does_not_modify_identity(self):
+        a, b = rf.SoftwareMt6177Target(8, 0, self.seed(21)), rf.SoftwareMt6177Target(12, 2, self.seed(99))
+        bus = rf.SerialBus({0: a, 2: b})
+        a.exchange(bsi.SerialCommand(1, 0, 0, False, False, ((367 << 20) | 7, 0), (31, 0)))
+        self.assertEqual(b.registers[367], 99)
+        bus.reset()
+        self.assertEqual((a.registers[367], b.registers[367]), (21, 99))
+        self.assertEqual((a.facts()["cw0"], b.facts()["cw0"]), (8, 0x2c))
+
     def test_software_identity_is_explicit_and_unwritten_reads_stay_pending(self):
         for chip_id, eco in ((8, 0), (12, 0), (12, 2), (1, 15)):
             target = rf.SoftwareMt6177Target(chip_id, eco)

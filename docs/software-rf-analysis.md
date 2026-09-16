@@ -29,12 +29,12 @@ values. Cockpit has separately hash-bound Lagos and Coful experiment profiles.
 
 - Immediate BSI and HWPOR share the same serial bus and software register state.
 - CW0 reads return the explicitly configured chip/ECO nibbles with upper bits
-  zero. The observed CW0 SOR write (`0x80000`) clears software register storage,
+  zero. The observed CW0 SOR write (`0x80000`) resets software register storage,
   preserving the configured identity. This is an analysis reset policy, not
   verified silicon behavior; other CW0 writes are unsupported.
 - Other accepted RF writes store their 20-bit payload at the addressed control
-  word. Reads return an actually written value. **Unwritten register reads stay
-  unresolved**, not zero-filled. Reserved framing and extended transfers are
+  word. Reads return an actually written value or an explicitly declared reset
+  seed (below). **All other reads stay unresolved**, not zero-filled. Reserved framing and extended transfers are
   rejected without creating a completion.
 - HWPOR consumes guest-programmed event/slot registers. No mtkloader output is
   injected into the device or guest RAM. Backend write handling drives completion;
@@ -52,6 +52,31 @@ values. Cockpit has separately hash-bound Lagos and Coful experiment profiles.
 The existing GCR timer is a separate read-incrementing approximation. A future
 shared guest-time model is required for timing fidelity; do not equate this
 sequencer's logical ticks with that timer's values.
+
+## Optional software reset state (analysis assumptions only)
+
+A port may additionally declare `reset_registers`, at most 64 canonical decimal
+address keys from 1 through 1023 (CW0 stays the separate identity/reset contract).
+Each entry requires a 20-bit integer `value`, `source: "analysis-assumption"`
+and a nonempty `reason`. For example, an unrelated synthetic test seed is:
+
+```json
+{"chip_id": 8, "eco": 0, "reset_registers": {
+  "341": {"value": 214375, "source": "analysis-assumption", "reason": "synthetic storage test, not measured silicon"}
+}}
+```
+
+Initialization, controller reset and CW0 SOR restore these declared values and
+discard guest writes. Writes may subsequently overwrite them. Inputs and facts
+are copied; targets on different ports remain isolated. `registers_written`
+counts actual guest-written registers, not seeds. Facts retain each seed and
+its reason, and reset-seeded read completions have a distinct assumption reason.
+Omitting the map preserves the original unresolved-read behavior.
+
+This is a caller-supplied storage experiment, not extracted register defaults or
+calibration emulation. It must not be used to claim analog completion/accuracy.
+In the reviewed Lagos code, CW367 (`0x16f`) is backed up then restored after
+calibration. That establishes storage usage, **not its silicon reset value**.
 
 ## Tests
 

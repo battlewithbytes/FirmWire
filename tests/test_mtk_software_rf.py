@@ -69,6 +69,21 @@ class SoftwareRfAdapterTests(unittest.TestCase):
             self.assertEqual(bank.kwargs["rf_profile"], self.profile())
             self.assertEqual(loader.capability_report["software_rf_analysis"], self.profile())
 
+    def test_adapter_propagates_explicit_reset_state_without_seeding_other_registers(self):
+        profile = self.profile()
+        profile["ports"]["0"]["reset_registers"] = {"341": {
+            "value": 0x54321, "source": "analysis-assumption", "reason": "synthetic storage"}}
+        d = self.device(profile)
+        for word, command in ((0x80000, 1), (0x555, 3)):
+            d.hw_write(0x1004, 4, word)
+            d.hw_write(0x1000, 4, command)
+        self.assertEqual(d.hw_read(0x100c, 4), 0x54321)
+        self.assertEqual(d.control_observation()["serial_targets"]["0"]["registers_written"], 0)
+        d.hw_write(0x1200, 4, 1)
+        d.hw_write(0x1004, 4, 0x556)
+        d.hw_write(0x1000, 4, 3)
+        self.assertEqual(d.hw_read(0x1008, 4), 0)
+
     @unittest.skipUnless(os.environ.get("FIRMWIRE_RF_POR_INVENTORIES"), "needs extracted inventories")
     def test_lagos_coful_both_revisions_actual_words_and_immediate_readback(self):
         paths = json.loads(os.environ["FIRMWIRE_RF_POR_INVENTORIES"])
