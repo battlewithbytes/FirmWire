@@ -23,6 +23,7 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
             read_layout=ReadCompletionLayout(0x1204, 0x1200, (0, 2)),
             serial_bus=bus)
         self.hwpor = HwporSequencer(HwporLayout(0x4000, 0x8000), self._hwpor_submit) if software else None
+        self.guest_clock = None
         if software:
             self.log.warning("SOFTWARE RF ANALYSIS %s: assumed identity/ECO %s; no silicon/calibration fidelity",
                              self.rf_profile["name"], self.rf_profile["ports"])
@@ -30,11 +31,15 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
                          bsi_mode, capture)
 
     def hw_read(self, offset, size):
+        if self.guest_clock is not None:
+            self.guest_clock.synchronize()
         if self._hwpor_access(offset):
             return self.hwpor.read(offset, size)
         return self.control.read(offset, size)
 
     def hw_write(self, offset, size, value):
+        if self.guest_clock is not None:
+            self.guest_clock.synchronize()
         if self._hwpor_access(offset):
             self.hwpor.write(offset, value, size)
             return True
@@ -52,9 +57,17 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
             raise ValueError("HWPOR backend must complete the actual write")
         return True
 
+    def bind_clock(self, clock):
+        if self.hwpor is None or self.guest_clock is not None:
+            raise ValueError("Requires an unbound software-RF sequencer")
+        clock.attach(self.hwpor)
+        self.guest_clock = clock
+
     def advance_guest_blocks(self, blocks):
-        # Explicit analysis clock: one logical tick per completed guest block,
-        # delivered in 1024-block batches. No wall-clock or poll-based progress.
+        if self.guest_clock is not None:
+            raise ValueError("Cannot mix manual ticks and shared guest time")
+        # Legacy/manual test entry point: one logical tick per supplied unit.
+        # Native software RF uses the bound GCR counter, never this path.
         if self.hwpor is not None:
             self.hwpor.advance(blocks)
 
@@ -65,5 +78,6 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
         facts = self.control.facts()
         if self.hwpor is not None:
             facts.update(software_rf_profile=self.rf_profile, hwpor=self.hwpor.facts(),
-                         clock_policy="one-logical-tick-per-guest-block-batched-1024")
+                         clock_policy=(self.guest_clock.facts() if self.guest_clock is not None
+                                       else "manual-logical-ticks-test-only"))
         return facts

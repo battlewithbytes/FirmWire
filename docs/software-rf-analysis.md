@@ -39,19 +39,24 @@ values. Cockpit has separately hash-bound Lagos and Coful experiment profiles.
 - HWPOR consumes guest-programmed event/slot registers. No mtkloader output is
   injected into the device or guest RAM. Backend write handling drives completion;
   an absent/unresolved backend leaves work pending.
-- The native execution callback advances the sequencer by 1024 logical ticks
-  every 1024 completed guest blocks. This is an explicit experimental scheduling
-  policy, **not** a model of silicon cycles or microseconds. Polling a register
-  does not itself advance the sequencer or fabricate responses. It remains
-  independent of whether a read-only observer is enabled.
+- Software RF synchronizes POR to the existing GCR analysis counter: 75 HWPOR
+  ticks per GCR unit, as in the reviewed event writer. The earlier independent
+  1024-block batches are removed. Due events run before a GCR value or BSI access
+  is exposed; BSI polls and observer snapshots do not advance the counter or
+  retry unanswered reads. **GCR timer reads still advance the legacy counter**:
+  this fixes relative ordering, not free-running/silicon timing fidelity.
 - Trigger 0 only; trigger strobes self-clear. Unsupported trigger-1, global-offset
   selector-1, MIPI configuration and active clear/retrigger fail explicitly.
-- No physical RF, analog calibration results, DSP execution, modem task progress,
+- No physical RF, measured analog calibration results, DSP execution, modem task progress,
   AP handshake or verified full boot is provided by this software target.
 
-The existing GCR timer is a separate read-incrementing approximation. A future
-shared guest-time model is required for timing fidelity; do not equate this
-sequencer's logical ticks with that timer's values.
+`rf_guest_clock` capability facts and the BSI `clock_policy` record the source,
+75:1 conversion, and both polling behaviors explicitly. GCR low words wrap at
+32 bits while its analysis epoch remains unwrapped for scheduling; its aliases
+retain the legacy same-counter interpretation, not independently verified OS
+timer semantics. Software RF requires cold restart: snapshot flags are refused.
+A future validated free-running virtual clock is still needed. Two attempted
+global guest-block sources exposed an earlier PMIC timeout and were not retained.
 
 ## Optional software reset state (analysis assumptions only)
 
@@ -78,12 +83,141 @@ calibration emulation. It must not be used to claim analog completion/accuracy.
 In the reviewed Lagos code, CW367 (`0x16f`) is backed up then restored after
 calibration. That establishes storage usage, **not its silicon reset value**.
 
+## Optional synthetic MT6177M RCAL responses
+
+Each port may explicitly select a `calibration` object:
+
+```json
+{"kind": "mt6177m-rcal-analysis/v1", "source": "analysis-assumption",
+ "reason": "Synthetic trial values, not measured RF calibration",
+ "cw10": 541200, "cw11": 473550, "trim5": 16}
+```
+
+CW10/CW11 must be integers in 0..0xfffff; `trim5` must be in 0..31. These bounds
+come from the decoded consumer's field widths, **not physical validity limits**.
+The factory never chooses this variant from a phone name or chip nibble. Unknown
+kinds and conflicting reset seeds for CW9/10/11 are rejected. Existing profiles
+without this object retain their storage-only behavior.
+
+The guest must write CW8=`0x81c00`, CW8=`0x81c01`, CW9=0, CW12=0 in that control
+order. The software model completes synchronously on the final setup write;
+it does not claim to enforce the firmware's waits or emulate analog timing.
+Before completion, result reads remain unresolved (and polling does not retry
+them). Afterwards CW10/CW11 return the configured words and CW9 returns
+`trim5 << 10`, overriding its stored control write of zero. Unrelated trim writes
+leave results stable. A new or unexpected write to CW8/9/10/11/12 invalidates or
+restarts setup; CW0 SOR and controller reset clear progress. Coful's additional
+CW11 setup write invalidates this M-variant sequence rather than silently using
+it as an L-variant model. Per-port instances remain isolated.
+
+Facts expose `calibration_emulated: true`, the exact configuration, setup phase,
+completion/read counts and synthetic timing; `analog_calibration_verified` and
+`silicon_verified` remain false. This object is **only RCAL**; CW77 remains
+unresolved unless the separate LDO model below is explicitly configured.
+No firmware instructions or runtime calibration tables are patched/preloaded.
+
+## Optional synthetic MT6177M LDO responses
+
+A port may additionally select `ldo_calibration` independently of RCAL:
+
+```json
+{"kind": "mt6177m-ldo-analysis/v1", "source": "analysis-assumption",
+ "reason": "Synthetic trial trims, not measured RF calibration",
+ "trims": {"8": 7, "64": 19}}
+```
+
+`trims` is a nonempty subset of the reviewed selectors, keyed by canonical
+decimal strings. Missing selectors do not acquire a default result. Selectors
+`0x8` (THADC) and `0x10000` (TTG) accept four-bit trims; `0x100`, `0x400`,
+`0x200`, `0x80` (TX), `0x800`, `0x4000`, `0x8000` (STX), `0x80000`, `0x40000`,
+`0x20000` (SRX1), and `0x40`, `0x20`, `0x10` (RX) accept five-bit trims.
+These are digital consumer field widths, not physical validity ranges. Unknown
+kinds/selectors, boolean values, out-of-width trims and CW77 reset seeds fail
+validation. The model is not automatically selected from identity or ROM name.
+
+The reviewed sequence is CW15=`0x5800`, CW75=`0x80000`, optional CW77 clear-phase
+read, CW15=`0x1800`, CW76=selector, CW75=`0x40000`, CW77 result read.
+THADC instead triggers with `0x60000`. RX selectors `0x40`/`0x20` use CW15
+`0x7800`/`0x3800`. Intervening unrelated analog-register writes are storage-only.
+The clear-phase read returns an explicitly assumed zero; the original consumer
+overwrites that value before using the result. Reads do not advance setup.
+
+Completion is synchronous on the reviewed trigger and returns `trim << 15`.
+The firmware's 20/140-unit waits are not enforced as analog latency. The selected
+result is latched: clearing CW76 after trigger preserves it because RX does that
+before readback. Other unreviewed control/result writes invalidate state;
+CW15=`0x800` disables it. CW0 SOR and controller reset clear all model progress.
+Per-port/device state is isolated. Facts expose exact configuration, current
+phase, latched selector, completion and read counts, and completed selectors.
+All physical/analog verification flags stay false.
+
+Tests cover every selector, zero/max/varied trims, invalid sequences, mode and
+trigger mismatches, omitted selectors, reset, input/fact copying and isolation.
+Native guest tests independently exercise THADC and RX with distinct trim sets,
+including selection clearing before read. Without the separate model below, CW447 (RX RC) remains unresolved;
+this model does not implement subsequent RX RC, TPD, DSP or RF waveforms.
+
+The initial Cockpit LDO-profile attempt stopped
+before calibration at an early POR read. HWPOR later supplied the register but
+the immediate read remained unresolved. The adapter characterization test
+reproduces this both with and without LDO configured. That attempt used separate
+batched-block and read-driven clocks; shared-counter synchronization is the
+follow-up above. Do not
+interpret the model/native unit tests as proof of a successful firmware LDO run.
+
+The subsequent Cockpit shared-counter run (`drdi-preload-XWBp9A`) does qualify
+the LDO milestone: all 15 cycles, firmware-written trim commands and six ordered
+routine returns pass saved-live acceptance. It then times out on unsupported
+RX RC CW447. This is still a failed full boot, not analog RF or AP communication.
+
+## Optional synthetic MT6177M RX RC response
+
+A port may independently select `rx_rc_calibration`:
+
+```json
+{"kind": "mt6177m-rx-rc-analysis/v1", "source": "analysis-assumption",
+ "reason": "Synthetic test trim, not measured RF calibration", "trim6": 23}
+```
+
+Only integers 0..63 are accepted (not booleans). This is a consumer field width,
+not an analog validity range. CW447 reset seeds conflict with this model and are
+rejected. Nothing selects the model automatically from a phone name or identity.
+
+The reviewed setup is CW1=`0x112a0`, CW320=0, CW321=0, CW467=`0x2c01`,
+CW1=`0x212a8`, in that order. CW447 then returns `trim6 << 14`. Completion is
+synchronous on final setup; the consumer's 60-unit delay is not modeled as analog
+latency. Unrelated writes do not advance setup. Partial/wrong/reordered sequences
+stay unresolved. CW447 guest writeback, restore, or unexpected relevant control
+writes invalidate the result. Stored guest writeback is not a fallback calibration
+result. CW0 SOR/controller reset clears the model; per-port state is independent.
+
+Facts record the exact assumed configuration, phase, completions, reads and
+synthetic timing; analog/silicon verification remains false. The firmware itself
+duplicates the six-bit trim and writes its own calibration table. The model knows
+no instruction addresses, table locations, image names or polling counts.
+
+This contract does not provide RX TPD backup state/results, DSP responses, RF
+waveforms or an AP handshake. Unknown reads remain pending, with no automatic
+retry of reads issued before setup. The opt-in native test checks three distinct
+trims (including zero/max), guest writeback, earlier pending reads and isolation.
+
+Cockpit's unchanged-Lagos run `drdi-preload-BwUcfz` verifies one result consumed,
+the exact firmware-owned RX RC table store, RX RC return and RX TPD entry. It
+then waits on unwritten CW469 (`0x1d5`), times out and hits the existing PCCIF
+assertion. RX RC acceptance passes while full modem boot remains false.
+
 ## Tests
 
 `tests/test_mtk_rf_serial.py` tests framing, explicit identities, storage/readback,
 reset, unknown reads, negative inputs and profile validation.
+`tests/test_mtk_ldo.py` covers the separate LDO sequence/result contract.
+`tests/test_mtk_rx_rc.py` checks all 64 RX RC trims, partial/wrong/reordered
+sequences, invalidation, resets, isolation, disabled behavior and strict config.
 `tests/test_mtk_software_rf.py` checks loader gating and the integrated adapter.
 `tests/test_mtk_hwpor.py` covers the pure digital sequencer.
+`tests/test_mtk_guest_clock.py` tests relative deadlines across 1024 counter
+origins, stalled backends, invalid sources and time reversal. Native timer-wait
+tests use two starting phases/payloads and verify an unknown read stays pending.
 
 With the development PANDA runtime, `FIRMWIRE_TEST_NATIVE_BSI=1` enables
 `tests/test_mtk_bsi_native.py`: real synthetic guest instructions issue reset,

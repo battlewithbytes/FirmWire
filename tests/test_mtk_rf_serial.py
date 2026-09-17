@@ -18,6 +18,84 @@ bsi = load("rf_bsi_unit", "bsi.py")
 
 
 class RFSerialTests(unittest.TestCase):
+    def calibration(self, a=0x84210, b=0x739ce, trim=16):
+        return dict(kind="mt6177m-rcal-analysis/v1", source="analysis-assumption",
+                    reason="synthetic test results; not measured RF", cw10=a, cw11=b, trim5=trim)
+
+    def test_rcal_results_require_ordered_setup_and_do_not_alias_written_control(self):
+        for a, b, trim in ((0, 0, 0), (0xfffff, 0xfffff, 31), (0x84210, 0x739ce, 16), (1, 5, 7)):
+            config = self.calibration(a, b, trim)
+            target = rf.SoftwareMt6177Target(8, 0, calibration=config)
+            config["cw10"] ^= 1
+            def read(address):
+                return target.exchange(bsi.SerialCommand(1, 0, 0, True, False, (0x400 | address, 0), (0, 0)))
+            def write(address, payload):
+                return target.exchange(bsi.SerialCommand(1, 0, 0, False, False, ((address << 20) | payload, 0), (31, 0)))
+            for step, pair in enumerate(rf.Mt6177MRcalAnalysis.SETUP):
+                before = target.facts()
+                for register in (9, 10, 11):
+                    self.assertEqual(read(register).status, "unresolved")
+                self.assertEqual(target.facts(), before)  # polling cannot advance calibration
+                write(*pair)
+                self.assertEqual(target.calibration.phase, step+1)
+            self.assertEqual(target.registers[9], 0)
+            for _ in range(2):
+                for register, expected in ((10, a), (11, b), (9, trim << 10)):
+                    reply = read(register)
+                    self.assertEqual((reply.status, reply.value), ("read-complete", expected))
+                    self.assertEqual(reply.reason, "software-rcal-profile-assumption")
+                write(19, a)
+                write(20, b)
+            self.assertEqual(target.calibration.completions, 1)
+            self.assertEqual(read(0x4d).status, "unresolved")  # later LDO stage unsupported
+            facts = target.facts()
+            facts["calibration"]["config"]["cw10"] ^= 1
+            self.assertEqual(target.facts()["calibration"]["config"]["cw10"], a)
+            write(0, 0x80000)
+            self.assertEqual(read(10).status, "unresolved")
+            self.assertEqual(target.calibration.completions, 0)
+            self.assertFalse(target.facts()["silicon_verified"])
+
+    def test_rcal_incomplete_reordered_variant_and_invalid_transfers_do_not_complete(self):
+        good = rf.Mt6177MRcalAnalysis.SETUP
+        for sequence in (good[:3], good[::-1], good[1:], good + ((11, 0),),
+                         good + ((8, 0x81c00),), ((8, 0x81c00), (8, 0x81c02), (9, 0), (12, 0))):
+            target = rf.SoftwareMt6177Target(8, 0, calibration=self.calibration())
+            for address, value in sequence:
+                target.exchange(bsi.SerialCommand(1, 0, 0, False, False, ((address << 20) | value, 0), (31, 0)))
+            self.assertEqual(target.calibration.read(10).status, "unresolved")
+        target = rf.SoftwareMt6177Target(8, 0, calibration=self.calibration())
+        for word, extended in ((0x881c00, True), (1 << 30, False)):
+            before = target.facts()
+            self.assertEqual(target.exchange(bsi.SerialCommand(1, 0, 0, False, extended, (word, 0), (31, 0))).status,
+                             "unresolved")
+            self.assertEqual(target.facts(), before)
+
+    def test_rcal_validation_is_explicit_and_conflicting_reset_seeds_rejected(self):
+        config = self.calibration()
+        for key, value in (("kind", "mt6177l-rcal-analysis/v1"), ("source", "silicon"),
+                           ("reason", ""), ("cw10", True), ("cw11", -1),
+                           ("cw10", 0x100000), ("trim5", 32), ("extra", 1)):
+            with self.assertRaises(ValueError): rf.SoftwareMt6177Target(8, 0, calibration={**config, key:value})
+        with self.assertRaises(ValueError): rf.validate_rcal_config(None)
+        for register in (9, 10, 11):
+            seeds = {str(register): self.seed(0)["367"]}
+            with self.assertRaises(ValueError): rf.SoftwareMt6177Target(8, 0, seeds, config)
+            profile = dict(schema="firmwire.software-rf/v1", name="test", analysis_only=True,
+                assumptions="test", rom_sha256="a"*64, ports={"0": dict(chip_id=8, eco=0,
+                    reset_registers=seeds, calibration=config)})
+            with self.assertRaises(ValueError): rf.validate_software_rf_profile(profile, "a"*64)
+
+    def test_rcal_target_instances_and_bus_reset_are_independent(self):
+        a = rf.SoftwareMt6177Target(8, 0, calibration=self.calibration())
+        b = rf.SoftwareMt6177Target(8, 0, calibration=self.calibration(1, 2, 3))
+        for address, value in rf.Mt6177MRcalAnalysis.SETUP:
+            a.exchange(bsi.SerialCommand(1, 0, 0, False, False, ((address << 20) | value, 0), (31, 0)))
+        self.assertEqual(a.calibration.read(10).value, 0x84210)
+        self.assertEqual(b.calibration.read(10).status, "unresolved")
+        rf.SerialBus({0:a, 1:b}).reset()
+        self.assertFalse(a.calibration.facts()["ready"])
+
     def seed(self, value):
         return {"367": {"value": value, "source": "analysis-assumption",
                         "reason": "synthetic backup/restore test; not a silicon reset value"}}

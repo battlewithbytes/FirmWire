@@ -30,6 +30,7 @@ tree = ast.parse((ROOT / "machine.py").read_text())
 method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
               and node.name == "_install_execution_evidence")
 namespace = {"json": json, "log": Mock(), "__package__": "firmwire.vendor.mtk",
+    "bind_rf_clock": load("hw/guest_clock").bind_rf_clock,
     **{name: getattr(observation, name) for name in
        ("RamObservation", "validate_pc_markers", "record_pc_marker")}}
 exec(compile(ast.Module(body=[method], type_ignores=[]), "machine.py", "exec"), namespace)
@@ -74,6 +75,26 @@ class CheckpointAdapterTests(unittest.TestCase):
         self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
         self.reader.assert_not_called()
         self.assertNotIn("exception", self.callbacks)
+
+    def test_rf_clock_is_global_and_independent_of_optional_observer(self):
+        for observe in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                machine = self.make_machine(self.profile(directory) if observe else None)
+                seq = SimpleNamespace(ticks=0,advance=Mock())
+                gcr = SimpleNamespace(timer=0,bind_clock=Mock())
+                device = SimpleNamespace(hwpor=seq,bind_clock=lambda c:c.attach(seq))
+                machine.peripheral_map = {"GCRCustom":gcr,"bsi":device}
+                install(machine)
+                clock = gcr.bind_clock.call_args.args[0]
+                callback = self.callbacks["block"]
+                for i in range(1025): callback("cpu%d" % (i%2),SimpleNamespace(pc=0x3000),0)
+                seq.advance.assert_not_called()  # No former 1024-block dispatch batch
+                self.assertEqual(clock.synchronize(),0)
+                seq.advance.assert_called_once_with(0)
+                gcr.timer = 10
+                self.assertEqual(clock.synchronize(),10)
+                seq.advance.assert_called_with(750)
+                self.assertEqual(machine.loader.capability_report["rf_guest_clock"],clock.facts())
 
     def test_first_marker_persists_once_between_periodic_checkpoints(self):
         with tempfile.TemporaryDirectory() as directory:

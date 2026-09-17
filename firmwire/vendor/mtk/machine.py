@@ -23,6 +23,7 @@ from firmwire.vendor.mtk.hooks import (
 )
 from firmwire.vendor.mtk.mtk_task import MtkTask, TASK_STRUCT_SIZE
 from firmwire.vendor.mtk.observation import RamObservation, validate_pc_markers, record_pc_marker
+from firmwire.vendor.mtk.hw.guest_clock import bind_rf_clock
 
 from firmwire.util.port import find_free_port
 from firmwire.emulator.firmwire import FirmWireEmu
@@ -49,6 +50,10 @@ class MT6878Machine(FirmWireEmu):
             log.error("Unresolved startup capabilities; refusing machine initialization")
             return False
         native = loader.boot_mode == "native"
+        if (loader.loader_args.get("bsi") == "mt6768-software-rf"
+                and (getattr(args, "restore_snapshot", None) or getattr(args, "snapshot_at", None))):
+            log.error("Software RF guest clock supports cold restart only, not snapshots")
+            return False
         analysis_key = None
         if loader.loader_args.get("sej_analysis_state") is not None:
             if not native:
@@ -735,8 +740,9 @@ class MT6878Machine(FirmWireEmu):
         watches = []
         pc_markers = {}
         peripheral_controls = {}
-        clocked_controls = [p for p in self.peripheral_map.values() if getattr(p, "hwpor", None) is not None
-                            and hasattr(p, "advance_guest_blocks")]
+        rf_clock = bind_rf_clock(self.peripheral_map)
+        if rf_clock is not None:
+            report["rf_guest_clock"] = rf_clock.facts()
         exception_trace = None
         ram_sampler = None
 
@@ -812,9 +818,6 @@ class MT6878Machine(FirmWireEmu):
             execution = report["execution"]
             execution["completed_blocks"] += 1
             count = execution["completed_blocks"]
-            if clocked_controls and count % 1024 == 0:
-                for peripheral in clocked_controls:
-                    peripheral.advance_guest_blocks(1024)
             pc = int(tb.pc)
             # Even legacy CPUState CFFI field offsets can be stale. Compare
             # opaque callback pointers without dereferencing either CPU struct.
