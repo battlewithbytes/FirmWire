@@ -206,6 +206,51 @@ the exact firmware-owned RX RC table store, RX RC return and RX TPD entry. It
 then waits on unwritten CW469 (`0x1d5`), times out and hits the existing PCCIF
 assertion. RX RC acceptance passes while full modem boot remains false.
 
+## Optional synthetic MT6177M RX TPD response
+
+A port may independently select `rx_tpd_calibration`:
+
+```json
+{"kind": "mt6177m-rx-tpd-analysis/v1", "source": "analysis-assumption",
+ "reason": "Synthetic result trial, not measured RF calibration",
+ "cw423_trim4": 5, "cw429_trim4": 11}
+```
+
+The two trims must be integers in 0..15, not booleans. Those limits reflect the
+consumer's four-bit field extraction, not physical validity. CW423/CW429 reset
+seeds conflict with the result model and are rejected. It does not supply any
+CW469/CW472 backup defaults: those require actual guest writes or separately
+labelled `reset_registers` assumptions. Supplying backup seeds alone does not
+enable calibration results, and selecting the result model does not seed backups.
+
+The reviewed control sequence is:
+CW320=1, CW321=1, CW322=`0x8051`, CW324=`0x98b1`, CW326=`0x880`,
+CW399/CW400=`0x3d7a`, CW495=2, CW500/CW501=`0x1b780`, CW128=1,
+CW130=`0x29276`, CW131=`0x276a9`, CW179=`0x4b0e`, CW413/CW414=`0x7f8`,
+CW469/CW472 low ten bits=`0x96`, CW1=`0x212a8`, CW6=`0x414`.
+The upper ten bits of CW469/CW472 are unconstrained retained storage, not a
+selector or hardcoded fixture. All other setup payloads must match exactly.
+
+Only after the final trigger do CW423/CW429 return their configured trims shifted
+left eleven bits. Completion is synchronous; the firmware's 250-unit delay is
+not treated as an analog timing guarantee. Reads do not advance setup. Unrelated
+writes leave state alone. Relevant wrong writes, result writes or CW6=`0x384`
+disable/restore invalidate it. SOR/controller reset clears it and per-port state
+is independent. Early pending reads are not retried automatically.
+
+The guest retains control of backup read/modify/write, low-bit clearing, restoring
+CW320/CW321, and building the two command-table words. No firmware instruction or
+runtime table is patched. The model is never selected by a PC, image hash, phone
+name or inferred chip identity. Unknown stages and MT6177L compatibility remain
+unimplemented. Facts retain assumed config, progress and per-result read counts;
+analog/silicon verification is always false.
+
+Cockpit's unchanged-Lagos run `drdi-preload-o2RzXd` verifies both TPD results,
+the two firmware-owned table stores, TPD return, table-send return and enclosing
+calibration return. No RF read remains pending. A later data-bus exception at
+reported PC `0x901d2be6` still fails full boot; that mapping/access boundary is
+separate from the synthetic calibration contract.
+
 ## Tests
 
 `tests/test_mtk_rf_serial.py` tests framing, explicit identities, storage/readback,
@@ -213,6 +258,10 @@ reset, unknown reads, negative inputs and profile validation.
 `tests/test_mtk_ldo.py` covers the separate LDO sequence/result contract.
 `tests/test_mtk_rx_rc.py` checks all 64 RX RC trims, partial/wrong/reordered
 sequences, invalidation, resets, isolation, disabled behavior and strict config.
+`tests/test_mtk_rx_tpd.py` checks all 256 result pairs, every omitted/wrong setup
+word, masked backup preservation, invalidation, resets, disabled behavior and
+strict config. Native guest tests vary backup seeds and result pairs, perform
+the actual masked read/modify/write and verify early/disabled reads stay pending.
 `tests/test_mtk_software_rf.py` checks loader gating and the integrated adapter.
 `tests/test_mtk_hwpor.py` covers the pure digital sequencer.
 `tests/test_mtk_guest_clock.py` tests relative deadlines across 1024 counter

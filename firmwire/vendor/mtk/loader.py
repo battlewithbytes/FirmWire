@@ -30,6 +30,7 @@ from .machine import MT6878Machine
 from .hw import *
 from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from .hw.BSIPeripheral import BSIImmediatePeripheral
+from .hw.idc_uart import MTKIDCUARTPeripheral
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
 
 MAGIC = 0x58881688
@@ -78,6 +79,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "idc_uart": {
+            "type": str, "choices": ["disabled", "mt6768-control"], "default": "disabled",
+            "help": "OPT-IN IDC UART control subset; no peer, DMA or guest IRQ routing",
+        },
         "bsi": {
             "type": str, "choices": ["disabled", "mt6768-observe", "mt6768-pending", "mt6768-capture-writes", "mt6768-software-rf"], "default": "disabled",
             "help": "OPT-IN BSI analysis; capture-writes substitutes a write sink, never RF read values",
@@ -467,6 +472,20 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        idc_abi = self.loader_args.get("idc_uart", "disabled")
+        if idc_abi not in ("disabled", "mt6768-control"):
+            raise ValueError("Unsupported IDC UART ABI")
+        if idc_abi != "disabled":
+            if self.boot_mode != "native":
+                raise ValueError("IDC UART control analysis requires native boot mode")
+            self.add_memory_range(0xA60B0000, 0x1000, name="IDC_UART",
+                                  emulate=MTKIDCUARTPeripheral, permissions="rw-")
+            self.capability_report["idc_uart"] = {
+                "abi": idc_abi, "physical_base": 0xA60B0000,
+                "peer_connected": False, "guest_irq_routed": False,
+                "timing_verified": False, "control_only": True,
+            }
+            self.write_capability_report()
         bsi_mode = self.loader_args.get("bsi", "disabled")
         if bsi_mode not in ("disabled", "mt6768-observe", "mt6768-pending", "mt6768-capture-writes", "mt6768-software-rf"):
             raise ValueError("Unsupported BSI ABI")

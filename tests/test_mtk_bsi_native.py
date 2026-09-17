@@ -11,7 +11,7 @@ import time
 import unittest
 
 
-def child(directory, read_completion=False, capture=False, software=None, rcal=None, ldo=None, clock_trial=None, rx_rc=None):
+def child(directory, read_completion=False, capture=False, software=None, rcal=None, ldo=None, clock_trial=None, rx_rc=None, rx_tpd=None):
     from pandare import Panda
     from firmwire.vendor.mtk.machine import MT6878Machine
     from firmwire.vendor.mtk.hw.BSIPeripheral import BSIImmediatePeripheral
@@ -144,6 +144,35 @@ def child(directory, read_completion=False, capture=False, software=None, rcal=N
                 "lw $v0, 0x1108($t0)", "sw $v0, 0x1010($zero)", "break"]
         code, _ = Ks(KS_ARCH_MIPS, KS_MODE_MIPS32 | KS_MODE_LITTLE_ENDIAN).asm("\n".join(asm))
         instructions = list(struct.unpack("<%dI" % (len(code)//4), bytes(code)))
+    if rx_tpd is not None:
+        asm = ["li $t0, 0x400000", "li $t1, 0x5a7", "sw $t1, 0x1104($t0)",
+               "li $t1, 3", "sw $t1, 0x1100($t0)"]  # early bank1 read stays pending
+        def write(word):
+            asm.extend([f"li $t1, {word}", "sw $t1, 0x1004($t0)", "li $t1, 1", "sw $t1, 0x1000($t0)"])
+        def read(address,index=None):
+            asm.extend([f"li $t1, {0x400|address}", "sw $t1, 0x1004($t0)", "li $t1, 3", "sw $t1, 0x1000($t0)",
+                        "lw $v0, 0x100c($t0)","li $t1, 1", "sw $t1, 0x1200($t0)"])
+            if index is not None: asm.append(f"sw $v0, {0x1000+4*index}($zero)")
+        for word in (0x14000001,0x14100001,0x14208051,0x144098b1,0x14600880,
+                     0x18f03d7a,0x19003d7a,0x1ef00002,0x1f41b780,0x1f51b780,
+                     0x08000001,0x08229276,0x083276a9,0x0b304b0e,0x19d007f8,0x19e007f8):
+            write(word)
+        for address in (469,472):
+            read(address)
+            asm += ["li $t2, 0xffc00", "and $t2, $t2, $v0", f"li $t1, {(address<<20)|0x96}",
+                    "or $t1, $t1, $t2", "sw $t1, 0x1004($t0)", "li $t1, 1", "sw $t1, 0x1000($t0)"]
+        write(0x001212a8); write(0x00600414)
+        read(423,0); read(429,1)
+        write(0x00600384)
+        for address,index in ((469,2),(472,3)):
+            read(address)
+            asm += ["li $t2, 0xffc00", "and $t2, $t2, $v0", f"li $t1, {address<<20}",
+                    "or $t1, $t1, $t2", "sw $t1, 0x1004($t0)", "li $t1, 1", "sw $t1, 0x1000($t0)"]
+            read(address,index)
+        asm += ["li $t1, 0x5a7", "sw $t1, 0x1004($t0)", "li $t1, 3", "sw $t1, 0x1000($t0)",
+                "lw $v0, 0x1008($t0)", "sw $v0, 0x1010($zero)", "break"]
+        code, _ = Ks(KS_ARCH_MIPS, KS_MODE_MIPS32 | KS_MODE_LITTLE_ENDIAN).asm("\n".join(asm))
+        instructions = list(struct.unpack("<%dI" % (len(code)//4), bytes(code)))
     if clock_trial is not None:
         # Real guest GCR waits, rather than host sleeps or explicit sequencer
         # advance calls. Two different starting phases and payloads are checked.
@@ -188,6 +217,13 @@ def child(directory, read_completion=False, capture=False, software=None, rcal=N
     if rx_rc is not None:
         profile["ports"]["0"]["rx_rc_calibration"] = dict(kind="mt6177m-rx-rc-analysis/v1",
             source="analysis-assumption", reason="synthetic native RX RC test", trim6=rx_rc)
+    if rx_tpd is not None:
+        a,b,seed_a,seed_b = rx_tpd
+        port = profile["ports"]["0"]
+        port["rx_tpd_calibration"] = dict(kind="mt6177m-rx-tpd-analysis/v1",source="analysis-assumption",
+            reason="synthetic native TPD test",cw423_trim4=a,cw429_trim4=b)
+        port["reset_registers"].update({str(address):dict(value=value,source="analysis-assumption",reason="test backup seed")
+            for address,value in ((469,seed_a),(472,seed_b))})
     devices = {base: BSIImmediatePeripheral("bank-%x" % base, base, 0x9000,
                bsi_mode="software-rf" if software else "capture-writes" if capture else "pending",
                rf_profile=profile, firmwire_machine=machine) for base in (0x400000, 0x600000)}
@@ -244,6 +280,20 @@ def child(directory, read_completion=False, capture=False, software=None, rcal=N
 
 
 class NativeBsiTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_BSI") == "1", "requires development PANDA")
+    def test_guest_tpd_preserves_backup_bits_and_gates_results(self):
+        for mode,values in (("--child-rx-tpd",(5,11,0xa5d23,0x35e45)),
+                            ("--child-rx-tpd-other",(0,15,0,0xfffff))):
+            report = self.run_child(mode)
+            a,b,x,y=values
+            self.assertEqual(report["exception_index"],18)
+            self.assertEqual(report["guest_words"],[a<<11,b<<11,x&0xffc00,y&0xffc00,0])
+            device,other = report["devices"]
+            facts=device["serial_targets"]["0"]["rx_tpd_calibration"]
+            self.assertEqual((facts["completions"],facts["reads"],facts["ready"]),(1,{"423":1,"429":1},False))
+            self.assertEqual(other["serial_targets"]["0"]["rx_tpd_calibration"]["completions"],0)
+            self.assertEqual(len(device["pending"]),2)
+
     @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_BSI") == "1", "requires development PANDA")
     def test_guest_rx_rc_result_writeback_and_pending_reads(self):
         for mode,trim in (("--child-rx-rc",23),("--child-rx-rc-zero",0),("--child-rx-rc-max",63)):
@@ -359,11 +409,12 @@ class NativeBsiTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] in ("--child", "--child-read", "--child-capture", "--child-software", "--child-software-coful", "--child-rcal", "--child-rcal-other", "--child-ldo", "--child-ldo-other", "--child-clock", "--child-clock-other", "--child-rx-rc", "--child-rx-rc-zero", "--child-rx-rc-max"):
+    if len(sys.argv) == 3 and sys.argv[1] in ("--child", "--child-read", "--child-capture", "--child-software", "--child-software-coful", "--child-rcal", "--child-rcal-other", "--child-ldo", "--child-ldo-other", "--child-clock", "--child-clock-other", "--child-rx-rc", "--child-rx-rc-zero", "--child-rx-rc-max", "--child-rx-tpd", "--child-rx-tpd-other"):
         software = {"--child-software": (8, 0), "--child-software-coful": (12, 2)}.get(sys.argv[1])
         rcal = {"--child-rcal": (0x84210, 0x739ce, 16), "--child-rcal-other": (1, 0xfffff, 31)}.get(sys.argv[1])
         ldo = {"--child-ldo": (7,19), "--child-ldo-other": (0,31)}.get(sys.argv[1])
         clock_trial = {"--child-clock":(0,0x21485),"--child-clock-other":(1023,0xabcde)}.get(sys.argv[1])
         rx_rc = {"--child-rx-rc":23,"--child-rx-rc-zero":0,"--child-rx-rc-max":63}.get(sys.argv[1])
-        child(sys.argv[2], sys.argv[1] == "--child-read", sys.argv[1] == "--child-capture", (8, 0) if rcal or ldo or clock_trial or rx_rc is not None else software, rcal, ldo, clock_trial, rx_rc)
+        rx_tpd = {"--child-rx-tpd":(5,11,0xa5d23,0x35e45),"--child-rx-tpd-other":(0,15,0,0xfffff)}.get(sys.argv[1])
+        child(sys.argv[2], sys.argv[1] == "--child-read", sys.argv[1] == "--child-capture", (8, 0) if rcal or ldo or clock_trial or rx_rc is not None or rx_tpd else software, rcal, ldo, clock_trial, rx_rc, rx_tpd)
     else: unittest.main()

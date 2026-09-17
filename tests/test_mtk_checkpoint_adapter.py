@@ -55,6 +55,8 @@ class CheckpointAdapterTests(unittest.TestCase):
             peripheral_map={},
             panda=SimpleNamespace(cb_after_block_exec=register("block"),
                 cb_before_handle_exception=register("exception"),
+                cb_unassigned_io_read=register("io_read"),
+                cb_unassigned_io_write=register("io_write"),
                 physical_memory_read=self.reader,
                 libpanda=SimpleNamespace(panda_current_pc=lambda _: 0x2000)),
             avatar=SimpleNamespace(memory_ranges=SimpleNamespace(at=lambda address: [
@@ -75,6 +77,26 @@ class CheckpointAdapterTests(unittest.TestCase):
         self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
         self.reader.assert_not_called()
         self.assertNotIn("exception", self.callbacks)
+        self.assertNotIn("io_read", self.callbacks)
+
+    def test_io_observer_is_explicit_and_persisted_with_exception(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules,{
+            "firmwire.vendor.mtk.exception_observation":exceptions,
+            "firmwire.vendor.mtk.io_observation":load("io_observation")}):
+            install(self.make_machine(self.profile(directory,cpu_exceptions=True,unassigned_io=True)))
+            self.callbacks["block"]("cpu",SimpleNamespace(pc=0x2000),0)
+            self.assertIs(self.callbacks["io_write"]("cpu",0x2000,0x160b0024,4,3),False)
+            self.assertEqual(self.callbacks["exception"]("cpu",28),28)
+            execution=self.saved[-1]["execution"]
+            self.assertEqual(execution["unassigned_io"]["events"],1)
+            self.assertEqual(execution["cpu_exceptions"]["first"][0]["preceding_unassigned_io"][-1]["physical_address"],0x160b0024)
+            self.assertTrue(self.saved[-1]["ram_observer"]["unassigned_io"])
+
+    def test_io_observer_rejects_truthy_non_boolean_and_requires_exceptions(self):
+        for extra in ({"unassigned_io":"true"},{"unassigned_io":1},{"unassigned_io":True},
+                      {"unassigned_io":True,"cpu_exceptions":False}):
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                install(self.make_machine(self.profile(directory,**extra)))
 
     def test_rf_clock_is_global_and_independent_of_optional_observer(self):
         for observe in (False, True):

@@ -39,7 +39,7 @@ def validate_software_rf_profile(config, rom_sha256):
     for port, identity in ports.items():
         if (not isinstance(port, str) or not re.fullmatch(r"[0-9]|1[0-5]", port)
                 or not isinstance(identity, dict)
-                or not {"chip_id", "eco"} <= set(identity) <= {"chip_id", "eco", "reset_registers", "calibration", "ldo_calibration", "rx_rc_calibration"}
+                or not {"chip_id", "eco"} <= set(identity) <= {"chip_id", "eco", "reset_registers", "calibration", "ldo_calibration", "rx_rc_calibration", "rx_tpd_calibration"}
                 or any(type(identity[k]) is not int or not 0 <= identity[k] <= 15 for k in ("chip_id", "eco"))):
             raise ValueError("Invalid software RF port/identity/ECO")
         validate_reset_registers(identity.get("reset_registers", {}))
@@ -55,6 +55,10 @@ def validate_software_rf_profile(config, rom_sha256):
             validate_rx_rc_config(identity["rx_rc_calibration"])
             if "447" in identity.get("reset_registers", {}):
                 raise ValueError("RX RC result cannot also be a reset seed")
+        if "rx_tpd_calibration" in identity:
+            validate_rx_tpd_config(identity["rx_tpd_calibration"])
+            if set(identity.get("reset_registers", {})) & {"423", "429"}:
+                raise ValueError("RX TPD results cannot also be reset seeds")
     return copy.deepcopy(config)
 
 
@@ -92,6 +96,67 @@ def validate_rx_rc_config(config):
             or type(config["trim6"]) is not int or not 0 <= config["trim6"] <= 63):
         raise ValueError("Requires reviewed MT6177M RX RC kind and explicit six-bit synthetic trim")
     return copy.deepcopy(config)
+
+
+def validate_rx_tpd_config(config):
+    if (not isinstance(config, dict)
+            or set(config) != {"kind", "source", "reason", "cw423_trim4", "cw429_trim4"}
+            or config["kind"] != "mt6177m-rx-tpd-analysis/v1"
+            or config["source"] != "analysis-assumption"
+            or not isinstance(config["reason"], str) or not config["reason"].strip()
+            or any(type(config[k]) is not int or not 0 <= config[k] <= 15
+                   for k in ("cw423_trim4", "cw429_trim4"))):
+        raise ValueError("Requires reviewed MT6177M RX TPD kind and explicit four-bit synthetic trims")
+    return copy.deepcopy(config)
+
+
+class Mt6177MRxTpdAnalysis:
+    """Reviewed RX TPD digital setup, not an analog calibration or reset map.
+
+    CW469/472 upper bits are retained by the consumer, not result selectors.
+    Their initial values belong to explicit storage seeds or prior guest writes.
+    Only the low ten bits of those setup writes are constrained here. All other
+    setup words must match exactly. No guest PC or table address drives results.
+    """
+    SETUP = ((320, 1), (321, 1), (322, 0x8051), (324, 0x98b1), (326, 0x880),
+             (399, 0x3d7a), (400, 0x3d7a), (495, 2), (500, 0x1b780), (501, 0x1b780),
+             (128, 1), (130, 0x29276), (131, 0x276a9), (179, 0x4b0e),
+             (413, 0x7f8), (414, 0x7f8), (469, 0x96), (472, 0x96), (1, 0x212a8), (6, 0x414))
+    RESULTS = frozenset((423, 429))
+    CONTROLS = frozenset(a for a, _ in SETUP) | RESULTS
+
+    def __init__(self, config):
+        self.config = validate_rx_tpd_config(config)
+        self.reset()
+
+    def reset(self):
+        self.phase = self.completions = 0
+        self.reads = {str(a): 0 for a in self.RESULTS}
+
+    def write(self, cw):
+        if cw.address not in self.CONTROLS:
+            return
+        value = cw.payload & 0x3ff if cw.address in (469, 472) else cw.payload
+        item = (cw.address, value)
+        expected = self.SETUP[self.phase] if self.phase < len(self.SETUP) else None
+        self.phase = self.phase + 1 if item == expected else 1 if item == self.SETUP[0] else 0
+        if self.phase == len(self.SETUP):
+            self.completions += 1
+
+    def read(self, address):
+        if address not in self.RESULTS:
+            raise ValueError("Not an RX TPD result register")
+        if self.phase != len(self.SETUP):
+            return SerialResult("unresolved", reason="software-rx-tpd-sequence-not-complete")
+        self.reads[str(address)] += 1
+        return SerialResult("read-complete", self.config["cw%d_trim4" % address] << 11,
+                            "software-rx-tpd-profile-assumption")
+
+    def facts(self):
+        return {"config": copy.deepcopy(self.config), "phase": self.phase,
+                "ready": self.phase == len(self.SETUP), "completions": self.completions,
+                "reads": dict(self.reads), "timing": "synchronous-on-reviewed-trigger-analysis-only",
+                "analog_calibration_verified": False}
 
 
 class Mt6177MRxRcAnalysis:
@@ -360,7 +425,7 @@ class SoftwareMt6177Target(SerialTarget):
     explicitly assumed results after their reviewed command sequence.
     """
     def __init__(self, chip_id, eco, reset_registers=None, calibration=None, ldo_calibration=None,
-                 rx_rc_calibration=None):
+                 rx_rc_calibration=None, rx_tpd_calibration=None):
         if any(type(v) is not int or not 0 <= v <= 15 for v in (chip_id, eco)):
             raise ValueError("Explicit four-bit software RF identity/ECO required")
         self.chip_id, self.eco = chip_id, eco
@@ -368,6 +433,9 @@ class SoftwareMt6177Target(SerialTarget):
         self.calibration = Mt6177MRcalAnalysis(calibration) if calibration is not None else None
         self.ldo_calibration = Mt6177MLdoAnalysis(ldo_calibration) if ldo_calibration is not None else None
         self.rx_rc_calibration = Mt6177MRxRcAnalysis(rx_rc_calibration) if rx_rc_calibration is not None else None
+        self.rx_tpd_calibration = Mt6177MRxTpdAnalysis(rx_tpd_calibration) if rx_tpd_calibration is not None else None
+        if self.rx_tpd_calibration and set(self.reset_registers) & {"423", "429"}:
+            raise ValueError("RX TPD results cannot also be reset seeds")
         if self.rx_rc_calibration and "447" in self.reset_registers:
             raise ValueError("RX RC result cannot also be a reset seed")
         if self.ldo_calibration and "77" in self.reset_registers:
@@ -385,6 +453,8 @@ class SoftwareMt6177Target(SerialTarget):
             self.ldo_calibration.reset()
         if self.rx_rc_calibration:
             self.rx_rc_calibration.reset()
+        if self.rx_tpd_calibration:
+            self.rx_tpd_calibration.reset()
 
     def reset(self):
         self._reset_storage()
@@ -402,6 +472,11 @@ class SoftwareMt6177Target(SerialTarget):
             calibrated = None
             if cw.address == 0:
                 value = self.chip_id | self.eco << 4
+            elif self.rx_tpd_calibration and cw.address in self.rx_tpd_calibration.RESULTS:
+                calibrated = self.rx_tpd_calibration.read(cw.address)
+                if calibrated.status == "unresolved":
+                    return calibrated
+                value = calibrated.value
             elif self.rx_rc_calibration and cw.address == 447:
                 calibrated = self.rx_rc_calibration.read()
                 if calibrated.status == "unresolved":
@@ -440,6 +515,8 @@ class SoftwareMt6177Target(SerialTarget):
                     self.ldo_calibration.write(cw)
                 if self.rx_rc_calibration:
                     self.rx_rc_calibration.write(cw)
+                if self.rx_tpd_calibration:
+                    self.rx_tpd_calibration.write(cw)
             self.writes += 1
             value = cw.payload
             result = SerialResult("write-complete", reason="software-register-storage-analysis")
@@ -451,10 +528,11 @@ class SoftwareMt6177Target(SerialTarget):
         return {"kind": "mt6177-register-storage-analysis", "analysis_only": True,
                 "silicon_verified": False, "rf_emulated": False,
                 "calibration_emulated": any(m is not None for m in
-                    (self.calibration, self.ldo_calibration, self.rx_rc_calibration)),
+                    (self.calibration, self.ldo_calibration, self.rx_rc_calibration, self.rx_tpd_calibration)),
                 "calibration": self.calibration.facts() if self.calibration else None,
                 "ldo_calibration": self.ldo_calibration.facts() if self.ldo_calibration else None,
                 "rx_rc_calibration": self.rx_rc_calibration.facts() if self.rx_rc_calibration else None,
+                "rx_tpd_calibration": self.rx_tpd_calibration.facts() if self.rx_tpd_calibration else None,
                 "identity_source": "explicit-software-profile-assumption",
                 "chip_id": self.chip_id, "eco": self.eco, "cw0": self.chip_id | self.eco << 4,
                 "unknown_reads": "unresolved-not-zero-filled", "registers_written": len(self.written),

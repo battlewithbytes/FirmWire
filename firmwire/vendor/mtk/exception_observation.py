@@ -52,7 +52,7 @@ class ExceptionTrace:
         self.recent = []
         self.stack_recorded = False
 
-    def record(self, index, pc, context, completed_blocks, recent_pcs, stack=None):
+    def record(self, index, pc, context, completed_blocks, recent_pcs, stack=None, io_events=None):
         self.events += 1
         key = str(index) if type(index) is int and 0 <= index < 64 else "other"
         self.counts[key] = self.counts.get(key, 0) + 1
@@ -61,6 +61,8 @@ class ExceptionTrace:
         if stack is not None:
             event["stack"] = copy.deepcopy(stack)
             self.stack_recorded |= "words" in stack
+        if io_events is not None:
+            event["preceding_unassigned_io"] = copy.deepcopy(io_events)
         if len(self.first) < self.LIMIT:
             self.first.append(event)
         self.recent.append(event)
@@ -73,7 +75,7 @@ class ExceptionTrace:
                               "registers_or_payloads_recorded": self.stack_recorded})
 
 
-def install_exception_observer(panda, report, context_labels, persist, stack_capture=None):
+def install_exception_observer(panda, report, context_labels, persist, stack_capture=None, io_trace=None):
     """Use the compiled PC accessor, not stale Python CPUArchState layouts."""
     trace = ExceptionTrace()
     report["cpu_exception_observer"] = {"read_only": True,
@@ -87,11 +89,14 @@ def install_exception_observer(panda, report, context_labels, persist, stack_cap
         context = execution["per_context"].get(label, {})
         pc = int(panda.libpanda.panda_current_pc(cpu))
         stack = stack_capture.sample(cpu, index, pc) if stack_capture is not None else None
-        trace.record(index, pc, label, execution["completed_blocks"], context.get("recent_pcs", []), stack)
+        io_events = io_trace.preceding(label, execution["completed_blocks"]) if io_trace else None
+        trace.record(index, pc, label, execution["completed_blocks"], context.get("recent_pcs", []), stack, io_events)
         # Persist promptly even if a later MMIO dispatch thread dies. Bound
         # disk activity after the first events if an exception flood occurs.
         if trace.events <= trace.LIMIT or trace.events & (trace.events - 1) == 0:
             execution["cpu_exceptions"] = trace.snapshot()
+            if io_trace is not None:
+                execution["unassigned_io"] = io_trace.snapshot()
             persist()
         return index
 

@@ -744,6 +744,7 @@ class MT6878Machine(FirmWireEmu):
         if rf_clock is not None:
             report["rf_guest_clock"] = rf_clock.facts()
         exception_trace = None
+        io_trace = None
         ram_sampler = None
 
         def sample_ram():
@@ -796,6 +797,13 @@ class MT6878Machine(FirmWireEmu):
             observe_exceptions = config.get("cpu_exceptions", False)
             if type(observe_exceptions) is not bool:
                 raise ValueError("cpu_exceptions observer option must be boolean")
+            observe_io = config.get("unassigned_io", False)
+            if type(observe_io) is not bool or (observe_io and not observe_exceptions):
+                raise ValueError("unassigned_io must be boolean and requires cpu_exceptions")
+            if observe_io:
+                from .io_observation import install_unassigned_io_observer
+                io_trace = install_unassigned_io_observer(self.panda, report, context_labels)
+                report["ram_observer"]["unassigned_io"] = True
             if "exception_stack" in config and not observe_exceptions:
                 raise ValueError("exception_stack requires cpu_exceptions")
             if observe_exceptions:
@@ -811,7 +819,7 @@ class MT6878Machine(FirmWireEmu):
                         self.panda.physical_memory_read)
                     report["ram_observer"]["exception_stack"] = config["exception_stack"]
                 exception_trace = install_exception_observer(self.panda, report, context_labels,
-                                                              persist_exception_evidence, stack_capture)
+                                                              persist_exception_evidence, stack_capture, io_trace)
 
         @self.panda.cb_after_block_exec
         def cockpit_after_block(cpu, tb, exit_code):
@@ -851,6 +859,8 @@ class MT6878Machine(FirmWireEmu):
                 execution["recent_pcs"] = list(recent)
                 if exception_trace is not None:
                     execution["cpu_exceptions"] = exception_trace.snapshot()
+                if io_trace is not None:
+                    execution["unassigned_io"] = io_trace.snapshot()
                 if "security_domain" in report:
                     report["security_domain"] = self.peripheral_map["AES_TOP0"].analysis_facts()
                 mmu = self.peripheral_map.get("MDCORESYS_MML2_MCU_MMU_MMU")
