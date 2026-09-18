@@ -18,7 +18,8 @@ firmware PC, calibration dependency, or automatic peer response.
   FIFO overflow increments a counter and drops the new TX byte without turning
   an assigned UART write into an unassigned bus transaction.
 - `MTKIDCUARTRegisters` in `vendor/mtk/hw/idc_uart.py` specializes four-byte
-  spacing, 32-byte FIFOs, explicit RX threshold and baud configuration latches.
+  spacing, 32-byte FIFOs, explicit RX threshold, baud configuration latches and
+  reviewed four-slot IDC pattern configuration registers.
   `MTKIDCUARTPeripheral` connects it to the existing FirmWire MMIO framework;
   the constructor receives the address, not the UART implementation.
 - The loader's explicit `idc_uart=mt6768-control` selection supplies the reviewed
@@ -31,6 +32,21 @@ Different vendors should compose a core and their own register frontend. Matchin
 8250-like ABIs can reuse the register bank. A PL011-like ABI should not inherit
 8250 register semantics just because both devices are UARTs. Existing Shannon
 console stubs are unchanged; converting those needs separate ABI verification.
+
+### Extension contract
+
+The MMIO shell needs only `read(offset, size)` and `write(offset, size, value)`.
+Subclass `UARTRegisterBank` only for a genuinely compatible 8250-style ABI;
+override reviewed extension offsets and delegate ordinary offsets to `super()`.
+For a different ABI, supply an independent frontend object composed with
+`UARTCore`. Neither path requires editing the shell or adding vendor branches
+to the core. Each frontend owns its configuration, reset and validation rules.
+
+Rejected accesses raise `UARTAccessError` at the shell with direction, relative
+offset and width, preserving the underlying exception as its cause. The added
+context excludes the write payload. This remains a failure, not a silently
+acknowledged write. Tests cover both an unrelated test-only subclass and an
+independent non-8250 frontend, plus per-instance state and strict unknown access.
 
 ## Evidence and limits
 
@@ -46,9 +62,29 @@ Queues only change on explicit operations: reading status does not drain TX or
 invent RX. Therefore transmitting without a backend can fill TX and stall; this
 must not be presented as a working connectivity peer.
 
+### IDC pattern configuration subset
+
+The current ROM's `0x901d2e14` routine agrees with sibling `drv_idc_set_pm_config`:
+four slots at `0xc0 + 0x10*slot`, with PRI, PRI_BITEN, PAT, PAT_BITEN at relative
+offsets 0, 4, 8, 12. It disables PRI_BITEN before configuration and writes that
+field last. A live trace independently captured the old failure at offset
+`0xc4`, width 4. These addresses are evidence, not dispatch keys in the model.
+
+Each instance retains those byte-valued fields independently. Aligned 1/2/4-byte
+access follows the existing IDC frontend policy; unreviewed high bits are
+rejected, not silently discarded. Reset is explicit zero model state, not a
+claim of measured silicon defaults. No register polling creates an event.
+
+Capabilities distinguish `pattern_configuration_supported=true` from
+`pattern_matching_supported=false`. No incoming-stream matcher, PM status
+generation, or PM interrupt is implemented. A future connectivity backend must
+implement/review those semantics before claiming a working IDC link; direct
+`UARTCore.receive()` alone only exercises ordinary UART RX. This family subset
+is not automatically applied to arbitrary MediaTek, Qualcomm or Unisoc UARTs.
+
 Unsupported: receive timeout, parity/framing errors, modem/flow-control signals,
-loopback, DMA, baud-accurate timing, IDC pattern matching/PM registers, and the
-separate IDC control block. Unknown registers and unsupported control bits fail
+loopback, DMA, baud-accurate timing, IDC pattern matching/PM status, and the
+separate IDC control block (which has its own opt-in model). Unknown registers and unsupported control bits fail
 explicitly. Baud registers are storage, not a simulated serial clock. Core reset
 defaults are model defaults, not asserted silicon measurements.
 
@@ -61,7 +97,9 @@ No firmware instruction or runtime table is patched by the UART model.
 (1/2/16/32/64), DLAB aliases, overflow/reset, interrupt priority/acknowledgement,
 FIFO threshold, instance isolation, serialization, and loader opt-in/rejection.
 The IDC baud sequence is transcribed independently in tests. Unknown offsets
-remain failures. No modem fixture is needed.
+remain failures. Pattern tests vary every slot/field, all supported access
+widths, byte values, reset, serialization and malformed accesses; configuration
+alone creates no bytes or interrupt. No modem fixture is needed.
 
 `FIRMWIRE_TEST_NATIVE_UART=1 pytest tests/test_uart_native.py` executes synthetic
 MIPS instructions under the development PANDA against two independently placed

@@ -79,6 +79,21 @@ class CheckpointAdapterTests(unittest.TestCase):
         self.assertNotIn("exception", self.callbacks)
         self.assertNotIn("io_read", self.callbacks)
 
+    def test_idc_control_observer_is_explicit_available_and_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = self.make_machine(self.profile(directory,peripheral_controls=["IDC_CTRL"]))
+            control = SimpleNamespace(enable_control_observer=Mock(),
+                                      control_observation=lambda: {"enabled":True,"transmit_count":0})
+            machine.peripheral_map["IDC_CTRL"] = control
+            install(machine)
+            self.callbacks["block"]("cpu",SimpleNamespace(pc=0x2000),0)
+            control.enable_control_observer.assert_called_once()
+            self.assertEqual(self.saved[-1]["execution"]["peripheral_controls"]["IDC_CTRL"],
+                             {"enabled":True,"transmit_count":0})
+        for names in (["IDC_CTRL"],["IDC_CTRL","IDC_CTRL"],["unknown"]):
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                install(self.make_machine(self.profile(directory,peripheral_controls=names)))
+
     def test_io_observer_is_explicit_and_persisted_with_exception(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules,{
             "firmwire.vendor.mtk.exception_observation":exceptions,

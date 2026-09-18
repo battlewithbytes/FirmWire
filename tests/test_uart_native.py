@@ -22,8 +22,14 @@ def child(directory):
         asm += [f"li $t1, {value}", f"sw $t1, {offset}($t0)"]
     for index, offset in enumerate((0xc,0x24,0x54,0x5c,0x14,8)):
         asm += [f"lw $v0, {offset}($t0)", f"sw $v0, {0x1000+index*4}($zero)"]
+    # Last pattern slot as well as the first: cover layout, not a single boot write.
+    for offset, value in ((0xc4, 0), (0xc8, 0x3d), (0xcc, 0xf1), (0xc0, 0x72), (0xc4, 0x55), (0xfc, 0xa6)):
+        asm += [f"li $t1, {value}", f"sw $t1, {offset}($t0)"]
+    for index, offset in enumerate((0xc0,0xc4,0xc8,0xcc,0xfc)):
+        asm += [f"lbu $v0, {offset}($t0)", f"sw $v0, {0x101c+index*4}($zero)"]
     asm += ["li $t1, 0x5a", "sw $t1, 0($t0)",
             "li $t0, 0x600000", "lw $v0, 0x54($t0)", "sw $v0, 0x1018($zero)",
+            "lw $v0, 0xc4($t0)", "sw $v0, 0x1030($zero)",
             "li $t1, 1", "sw $t1, 0x1100($zero)", "j .", "nop"]
     code, _ = Ks(KS_ARCH_MIPS, KS_MODE_MIPS32 | KS_MODE_LITTLE_ENDIAN).asm("\n".join(asm))
     (root/"code.bin").write_bytes(bytes(code))
@@ -50,7 +56,7 @@ def child(directory):
     def done(cpu,tb,exit_code):
         if (root/"result.json").exists(): return
         if int.from_bytes(panda.physical_memory_read(0x1100,4),"little") == 1:
-            words = [int.from_bytes(panda.physical_memory_read(0x1000+i*4,4),"little") for i in range(7)]
+            words = [int.from_bytes(panda.physical_memory_read(0x1000+i*4,4),"little") for i in range(13)]
             result = {"words": words, "tx": list(devices[0x400000].registers.core.drain_tx()),
                       "rx": list(devices[0x400000].registers.core.rx)}
             (root/"result.tmp").write_text(json.dumps(result))
@@ -79,7 +85,7 @@ class NativeUARTTests(unittest.TestCase):
             log.seek(0)
             self.assertTrue(result.exists(),log.read()[-3000:])
             report = json.loads(result.read_text())
-            self.assertEqual(report["words"], [3,3,0x75,0xc1,0x60,0xc1,0])
+            self.assertEqual(report["words"], [3,3,0x75,0xc1,0x60,0xc1,0,0x72,0x55,0x3d,0xf1,0xa6,0])
             self.assertEqual(report["tx"],[0x5a])
             self.assertEqual(report["rx"],[])
 

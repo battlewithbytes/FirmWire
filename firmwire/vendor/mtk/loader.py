@@ -31,6 +31,7 @@ from .hw import *
 from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from .hw.BSIPeripheral import BSIImmediatePeripheral
 from .hw.idc_uart import MTKIDCUARTPeripheral
+from .hw.idc_control import MTKIDCControlPeripheral
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
 
 MAGIC = 0x58881688
@@ -79,9 +80,13 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "idc_control": {
+            "type": str, "choices": ["disabled", "mt6768-counter"], "default": "disabled",
+            "help": "OPT-IN IDC TX-counter enable with idle scheduler; no event completions or peer",
+        },
         "idc_uart": {
             "type": str, "choices": ["disabled", "mt6768-control"], "default": "disabled",
-            "help": "OPT-IN IDC UART control subset; no peer, DMA or guest IRQ routing",
+            "help": "OPT-IN IDC UART configuration; no pattern matching, peer, DMA or guest IRQ routing",
         },
         "bsi": {
             "type": str, "choices": ["disabled", "mt6768-observe", "mt6768-pending", "mt6768-capture-writes", "mt6768-software-rf"], "default": "disabled",
@@ -472,6 +477,19 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        control_abi = self.loader_args.get("idc_control", "disabled")
+        if control_abi not in ("disabled", "mt6768-counter"):
+            raise ValueError("Unsupported IDC control ABI")
+        if control_abi != "disabled":
+            if self.boot_mode != "native":
+                raise ValueError("IDC control analysis requires native boot mode")
+            self.add_memory_range(0xA60A0000, 0x1000, name="IDC_CTRL",
+                                  emulate=MTKIDCControlPeripheral, permissions="rw-")
+            self.capability_report["idc_control"] = {
+                "abi": control_abi, "physical_base": 0xA60A0000,
+                "scheduler_supported": False, "peer_connected": False,
+            }
+            self.write_capability_report()
         idc_abi = self.loader_args.get("idc_uart", "disabled")
         if idc_abi not in ("disabled", "mt6768-control"):
             raise ValueError("Unsupported IDC UART ABI")
@@ -484,6 +502,7 @@ class MTKLoader(firmwire.loader.Loader):
                 "abi": idc_abi, "physical_base": 0xA60B0000,
                 "peer_connected": False, "guest_irq_routed": False,
                 "timing_verified": False, "control_only": True,
+                "pattern_configuration_supported": True, "pattern_matching_supported": False,
             }
             self.write_capability_report()
         bsi_mode = self.loader_args.get("bsi", "disabled")

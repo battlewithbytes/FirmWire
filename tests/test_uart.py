@@ -7,6 +7,85 @@ from firmwire.vendor.mtk.hw.idc_uart import MTKIDCUARTRegisters
 
 
 class UARTTests(unittest.TestCase):
+    def test_non_8250_frontend_composes_without_inheriting_register_abi(self):
+        from firmwire.hw.uart_peripheral import UARTPeripheral
+        from firmwire.vendor.mtk.machine import MT6878Machine
+
+        class ExampleNon8250:
+            # Illustrative ABI only; deliberately different data/status offsets.
+            def __init__(self):
+                self.core = UARTCore(2)
+
+            def read(self, offset, size):
+                if size == 4 and offset == 0x90: return self.core.read_rx()
+                if size == 4 and offset == 0x94: return self.core.read_lsr()
+                raise NotImplementedError("unknown example read")
+
+            def write(self, offset, size, value):
+                if size == 4 and offset == 0x90: return self.core.write_tx(value)
+                raise NotImplementedError("unknown example write")
+
+        bank = ExampleNon8250()
+        device = UARTPeripheral("example", 0x500000, 0x100, register_bank=bank,
+                                firmwire_machine=object.__new__(MT6878Machine))
+        self.assertTrue(device.hw_write(0x90, 4, ord("k")))
+        self.assertEqual(bank.core.drain_tx(), b"k")
+        bank.core.receive(b"r")
+        self.assertTrue(device.hw_read(0x94, 4) & 1)
+        self.assertEqual(device.hw_read(0x90, 4), ord("r"))
+
+    def test_other_vendor_extension_reuses_shell_and_core(self):
+        from firmwire.hw.uart_peripheral import UARTPeripheral, UARTAccessError
+        from firmwire.vendor.mtk.machine import MT6878Machine
+
+        class ExampleRegisters(UARTRegisterBank):
+            # Test-only ABI: not an MTK register or a claim about other silicon.
+            def reset(self):
+                super().reset()
+                self.config = 0
+
+            def read(self, offset, size):
+                if offset == 0x40 and size == 1:
+                    return self.config
+                return super().read(offset, size)
+
+            def write(self, offset, size, value):
+                if offset == 0x40 and size == 1:
+                    if value not in (0, 1):
+                        raise ValueError("unsupported example config")
+                    self.config = value
+                    return True
+                return super().write(offset, size, value)
+
+        banks = [ExampleRegisters() for _ in range(2)]
+        devices = [UARTPeripheral("example", address, 0x100, register_bank=bank,
+                   firmwire_machine=object.__new__(MT6878Machine))
+                   for address, bank in zip((0x300000, 0x500000), banks)]
+        devices[0].hw_write(0x40, 1, 1)
+        self.assertEqual([d.hw_read(0x40, 1) for d in devices], [1, 0])
+        devices[0].hw_write(0, 1, ord("q"))
+        self.assertEqual(banks[0].core.drain_tx(), b"q")
+        self.assertEqual(banks[1].core.drain_tx(), b"")
+        for offset, size, value in ((0x40, 4, 1), (0x40, 1, 2), (0x44, 1, 0)):
+            with self.assertRaises(UARTAccessError): devices[0].hw_write(offset, size, value)
+        banks[0].reset()
+        self.assertEqual(devices[0].hw_read(0x40, 1), 0)
+
+    def test_bank_rejections_keep_bus_context_without_payload(self):
+        from firmwire.hw.uart_peripheral import UARTPeripheral, UARTAccessError
+        from firmwire.vendor.mtk.machine import MT6878Machine
+        for bank in (UARTRegisterBank(), MTKIDCUARTRegisters()):
+            device = UARTPeripheral("test", 0x400000, 0x1000, register_bank=bank,
+                                    firmwire_machine=object.__new__(MT6878Machine))
+            for direction in ("read", "write"):
+                with self.assertRaises(UARTAccessError) as caught:
+                    if direction == "write": device.hw_write(0x100, 4, 0xdecafbad)
+                    else: device.hw_read(0x100, 4)
+                error = caught.exception
+                self.assertEqual((error.direction, error.offset, error.size), (direction, 0x100, 4))
+                self.assertNotIn("decafbad", str(error))
+                self.assertIsInstance(error.__cause__, ValueError)
+
     def test_generic_peripheral_accepts_composed_register_bank(self):
         from firmwire.hw.uart_peripheral import UARTPeripheral
         from firmwire.vendor.mtk.machine import MT6878Machine
@@ -42,6 +121,8 @@ class UARTTests(unittest.TestCase):
             if mappings:
                 self.assertIs(mappings[0].kwargs["emulate"], MTKIDCUARTPeripheral)
                 self.assertFalse(loader.capability_report["idc_uart"]["guest_irq_routed"])
+                self.assertTrue(loader.capability_report["idc_uart"]["pattern_configuration_supported"])
+                self.assertFalse(loader.capability_report["idc_uart"]["pattern_matching_supported"])
         for abi, mode in (("unknown", "native"), ("mt6768-control", "rehosted")):
             loader = object.__new__(MTKLoader)
             loader.loader_args, loader.boot_mode = {"idc_uart": abi}, mode
@@ -142,7 +223,48 @@ class UARTTests(unittest.TestCase):
         self.assertTrue(bank.core.irq)
         self.assertEqual(bank.read(0,4), ord("x"))
         self.assertFalse(bank.core.irq)
-        for offset in (0x20, 0xbc, 0xc0):
+        for offset in (0x20, 0xbc, 0x100):
             with self.assertRaises(ValueError): bank.read(offset,4)
         bank.reset()
         self.assertEqual(bank.read(0x54,4), 0)
+
+    def test_idc_pattern_configuration_all_slots_widths_and_reset(self):
+        # Independent family ABI transcription; no firmware PC, image or fixture.
+        for size in (1, 2, 4):
+            bank, other = MTKIDCUARTRegisters(), MTKIDCUARTRegisters()
+            levels = []
+            bank.core.irq_sink = levels.append
+            expected = {}
+            for slot in range(4):
+                base = 0xc0 + 16*slot
+                bank.write(base+4, size, 0)  # driver disables matching while configuring
+                for field, value in ((8, 0xa0+slot), (12, 0xf0-slot), (0, 0x30+slot), (4, 0x70+slot)):
+                    bank.write(base+field, size, value)
+                    expected[base+field] = value
+            for offset, value in expected.items():
+                self.assertEqual(bank.read(offset, size), value)
+                self.assertEqual(other.read(offset, size), 0)
+            restored = pickle.loads(pickle.dumps(bank))
+            for offset, value in expected.items(): self.assertEqual(restored.read(offset, size), value)
+            self.assertEqual(levels, [])
+            self.assertEqual(bank.core.drain_tx(), b"")
+            self.assertEqual(list(bank.core.rx), [])
+            bank.core.receive(b"R")
+            bank.core.write_tx(ord("T"))
+            bank.core.set_ier(1)
+            before = (list(bank.core.rx), list(bank.core.tx), bank.core.irq, list(levels))
+            bank.write(0xc4, size, 0)
+            bank.write(0xcc, size, 0xff)
+            self.assertEqual((list(bank.core.rx), list(bank.core.tx), bank.core.irq, levels), before)
+            bank.reset()
+            for offset in expected: self.assertEqual(bank.read(offset, size), 0)
+
+    def test_idc_pattern_configuration_rejects_unknown_and_reserved_values(self):
+        bank = MTKIDCUARTRegisters()
+        bank.write(0xc4, 4, 0x5a)
+        for value in (256, 0x10000, -1, True, 1.0):
+            with self.assertRaises(ValueError): bank.write(0xc4, 4, value)
+            self.assertEqual(bank.read(0xc4, 4), 0x5a)
+        for offset, size in ((0xc1, 1), (0xc4, 8), (0xbc, 4), (0x100, 4)):
+            with self.assertRaises(ValueError): bank.read(offset, size)
+            with self.assertRaises(ValueError): bank.write(offset, size, 0)
