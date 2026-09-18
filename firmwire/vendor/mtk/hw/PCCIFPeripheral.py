@@ -6,11 +6,13 @@ import subprocess
 import os
 import tempfile
 import shutil
+import json
 
 from enum import Enum, auto
 from . import PassthroughPeripheral
 from .FSD import MTKFSD
 from .ap_properties import APSystemProperties
+from .ccci_metadata import packet_metadata
 
 # Linux: SMEM_USER_CCISM_MCU
 first_ringbuf_size = 721 * 1024
@@ -495,7 +497,15 @@ class PCCIF_Periph(PassthroughPeripheral):
                     )
                     assert False
                 ring = Ringbuf(self.ringbuffer, self.ringbuffer.offsets[value])
+                ring_metadata = {"ring_index": value, "ring_offset": ring.offset,
+                                 "read": self.ringbuffer.read_raw(ring.offset, 4),
+                                 "write": self.ringbuffer.read_raw(ring.offset + 4, 4),
+                                 "capacity": self.ringbuffer.read_raw(ring.offset + 8, 4)}
                 packet = bytes(ring.readPacket())
+                metadata = dict(packet_metadata(packet), **ring_metadata)
+                if not metadata["header_complete"]:
+                    self.log.error("Truncated CCCI header metadata=%s", json.dumps(metadata, sort_keys=True))
+                    raise ValueError("Truncated CCCI header")
                 channel = struct.unpack("<H", packet[8:10])[0]
                 self.log.debug(f"incoming packet channel {channel:x}")
                 if channel == 0x20:  # CCCI_RPC_RX
@@ -505,7 +515,7 @@ class PCCIF_Periph(PassthroughPeripheral):
                 elif channel == 0x0:  # CCCI_CONTROL_RX
                     self.handleControlPacket(ring, packet)
                 else:
-                    self.log.error("Unknown channel")
+                    self.log.error("Unknown channel metadata=%s", json.dumps(metadata, sort_keys=True))
                     assert False
         elif offset == 0x14:
             # ACK
