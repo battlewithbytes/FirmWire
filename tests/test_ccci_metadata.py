@@ -5,11 +5,32 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from firmwire.vendor.mtk.hw.ccci_metadata import packet_metadata
+from firmwire.vendor.mtk.hw.ccci_metadata import packet_metadata, ipc_metadata
 from firmwire.vendor.mtk.hw.PCCIFPeripheral import PCCIF_Periph, CCIF_PKG_HEADER, CCIF_PKG_FOOTER
 
 
 class CCCIMetadataTests(unittest.TestCase):
+    def test_ipc_envelope_metadata_never_dereferences_or_logs_payload(self):
+        body = b"sensitive-application"
+        packet = (struct.pack("<IIHHI",0,44+len(body),0x22,0,0x80000003)
+                  +struct.pack("<6I",7,8,9,10,0xdeadbeef,0)
+                  +struct.pack("<BBH",1,0,4+len(body))+body)
+        facts = ipc_metadata(packet)
+        self.assertEqual((facts["source_module"],facts["destination_module"],facts["sap_id"],facts["message_id"]),(7,8,9,10))
+        self.assertEqual(facts["ap_unified_id"],0x80000003)
+        self.assertTrue(facts["local_parameter_length_matches"])
+        self.assertFalse(facts["application_verified"])
+        self.assertNotIn(body.decode(),json.dumps(facts))
+        self.assertNotIn(str(0xdeadbeef),json.dumps(facts))
+        for length in range(40):
+            self.assertFalse(ipc_metadata(packet[:length])["ilm_complete"])
+        for length in range(40,44):
+            self.assertIsNone(ipc_metadata(packet[:length])["local_parameter_length_candidate"])
+        malformed = packet[:42]+b"\x01\x00"+packet[44:]
+        self.assertFalse(ipc_metadata(malformed)["local_parameter_length_matches"])
+        wrong_channel = packet[:8]+b"\x20\x00"+packet[10:]
+        with self.assertRaises(ValueError): ipc_metadata(wrong_channel)
+
     def test_real_ring_consumption_is_unchanged_by_metadata(self):
         mem = bytearray(512)
         struct.pack_into("<III",mem,8,0,40,256)

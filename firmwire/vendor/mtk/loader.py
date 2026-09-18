@@ -32,6 +32,8 @@ from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from .hw.BSIPeripheral import BSIImmediatePeripheral
 from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
+from .hw.PCCIFPeripheral import PCCIF_Periph
+from .hw.ccci_ipc import unavailable_wmt_dispatcher
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
 
 MAGIC = 0x58881688
@@ -80,6 +82,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "ccci_ipc": {
+            "type": str, "choices": ["disabled", "wmt-unavailable"], "default": "disabled",
+            "help": "OPT-IN analysis WMT/STP-unavailable sink; no application reply or real AP peer",
+        },
         "idc_control": {
             "type": str, "choices": ["disabled", "mt6768-counter"], "default": "disabled",
             "help": "OPT-IN IDC TX-counter enable with idle scheduler; no event completions or peer",
@@ -465,6 +471,11 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_memory_map(self):
+        ipc_mode = self.loader_args.get("ccci_ipc", "disabled")
+        if ipc_mode not in ("disabled", "wmt-unavailable"):
+            raise ValueError("Unsupported CCCI IPC policy")
+        if ipc_mode != "disabled" and self.boot_mode != "native":
+            raise ValueError("CCCI IPC analysis requires native boot mode")
         self.build_peripheral_maps()
 
         ########################
@@ -472,7 +483,18 @@ class MTKLoader(firmwire.loader.Loader):
         ########################
 
         for peripheral in self.modem_soc.peripherals:
-            self.create_soc_peripheral(peripheral)
+            if (ipc_mode != "disabled" and issubclass(peripheral._cls, PCCIF_Periph)
+                    and peripheral._attr.get("pccifid") == 0):
+                attributes = dict(peripheral._attr, ipc_dispatcher=unavailable_wmt_dispatcher())
+                self.create_peripheral(peripheral, peripheral._address, peripheral._size, **attributes)
+                self.capability_report["ccci_ipc"] = {
+                    "policy": "wmt-stp-unavailable-analysis/v1", "abi": "ccci-ipc-ilm32/v1",
+                    "peer_connected": False, "application_verified": False,
+                    "response_supported": False,
+                }
+                self.write_capability_report()
+            else:
+                self.create_soc_peripheral(peripheral)
 
         return True
 

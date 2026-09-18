@@ -12,7 +12,8 @@ from enum import Enum, auto
 from . import PassthroughPeripheral
 from .FSD import MTKFSD
 from .ap_properties import APSystemProperties
-from .ccci_metadata import packet_metadata
+from .ccci_metadata import packet_metadata, ipc_metadata
+from .ccci_ipc import IPCDispatcher
 
 # Linux: SMEM_USER_CCISM_MCU
 first_ringbuf_size = 721 * 1024
@@ -443,7 +444,7 @@ CCCI_RPC_TX = 33
 
 
 class PCCIF_Periph(PassthroughPeripheral):
-    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, **kwargs):
+    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, ipc_dispatcher=None, **kwargs):
         super().__init__(name, address, size, **kwargs)
 
         self.pccifid = pccifid
@@ -453,6 +454,9 @@ class PCCIF_Periph(PassthroughPeripheral):
         if ap_properties is not None and not isinstance(ap_properties, APSystemProperties):
             raise ValueError("ap_properties must be an APSystemProperties instance")
         self.ap_properties = ap_properties if ap_properties is not None else APSystemProperties()
+        if ipc_dispatcher is not None and not isinstance(ipc_dispatcher, IPCDispatcher):
+            raise ValueError("ipc_dispatcher must be an IPCDispatcher instance")
+        self.ipc_dispatcher = ipc_dispatcher
 
     # 0 CON, 4 BUSY, C TCHNUM, 14 ACK, 100 CHDATA
     def hw_read(self, offset, size):
@@ -514,7 +518,18 @@ class PCCIF_Periph(PassthroughPeripheral):
                     self.handleFSPacket(ring, packet)
                 elif channel == 0x0:  # CCCI_CONTROL_RX
                     self.handleControlPacket(ring, packet)
+                elif channel == 0x22 and self.ipc_dispatcher is not None:
+                    metadata["ipc"] = ipc_metadata(packet)
+                    try:
+                        disposition = self.ipc_dispatcher.receive(packet)
+                    except (ValueError, NotImplementedError):
+                        self.log.error("Rejected IPC metadata=%s", json.dumps(metadata, sort_keys=True))
+                        raise
+                    self.log.info("IPC disposition metadata=%s", json.dumps(
+                        dict(metadata, disposition=disposition), sort_keys=True))
                 else:
+                    if channel == 0x22:
+                        metadata["ipc"] = ipc_metadata(packet)
                     self.log.error("Unknown channel metadata=%s", json.dumps(metadata, sort_keys=True))
                     assert False
         elif offset == 0x14:
