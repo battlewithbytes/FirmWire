@@ -14,6 +14,7 @@ from .FSD import MTKFSD
 from .ap_properties import APSystemProperties
 from .ccci_metadata import packet_metadata, ipc_metadata
 from .ccci_ipc import IPCDispatcher
+from .ccci_ports import ClosedAPPorts
 
 # Linux: SMEM_USER_CCISM_MCU
 first_ringbuf_size = 721 * 1024
@@ -160,69 +161,38 @@ class Ringbuf:
         self.parent = parent
         self.offset = offset
 
-    def readPacket(self):
-        # rx
+    def rx_state(self):
         read = self.parent.read_raw(self.offset + 0, 4)
         write = self.parent.read_raw(self.offset + 4, 4)
         length = self.parent.read_raw(self.offset + 8, 4)
-        size = write - read
-        if size < 0:
-            size = size + length
+        if (length < 16 or length % 8 or self.offset + 24 + length > len(self.parent.mem)
+                or not 0 <= read < length or not 0 <= write < length or read % 8 or write % 8):
+            raise ValueError("Invalid CCIF receive-ring bounds or alignment")
+        return read, write, length, (write - read) % length
 
-        # offset of buffer
-        offset = self.offset + 24
-        # print(f"base is {offset:x}, orig base {self.offset:x}")
-
-        if size == 0:
+    def readPacket(self):
+        read, write, length, available = self.rx_state()
+        if not available:
             return None
-        assert size >= 16
+        if available < 16:
+            raise ValueError("Truncated CCIF receive-ring frame")
+        base = self.offset + 24
 
-        packet = bytes()
+        def span(cursor, size):
+            cursor %= length
+            first = min(size, length - cursor)
+            return bytes(self.parent.mem[base + cursor:base + cursor + first]) + bytes(
+                self.parent.mem[base:base + size - first])
 
-        # header
-        hdrtmp = self.parent.read_raw(offset + read, 4)
-        assert hdrtmp == CCIF_PKG_HEADER
-        read = read + 4
-        if read >= length:
-            read = 0
-        packetlen = self.parent.read_raw(offset + read, 4)
-        read = read + 4
-        if read >= length:
-            read = 0
-
-        # payload
-        firstpart = packetlen
-        secondpart = 0
-        if read + firstpart > length:
-            secondpart = read + firstpart - length
-            firstpart = length - read
-        packet = self.parent.mem[offset + read : offset + read + firstpart]
-        packet = packet + self.parent.mem[offset : offset + secondpart]
-
-        read = read + packetlen
-        if read >= length:
-            read = secondpart
-        if packetlen % 8:
-            # align
-            read = read + 8 - (packetlen % 8)
-            if read >= length:
-                read = 0
-
-        # footer
-        hdrtmp = self.parent.read_raw(offset + read, 4)
-        assert hdrtmp == CCIF_PKG_FOOTER
-        read = read + 4
-        if read >= length:
-            read = 0
-        hdrtmp = self.parent.read_raw(offset + read, 4)
-        assert hdrtmp == CCIF_PKG_FOOTER
-        read = read + 4
-        if read >= length:
-            read = 0
-
-        # advance read pointer
-        self.parent.write_raw(self.offset + 0, 4, read)
-
+        magic, packetlen = struct.unpack("<II", span(read, 8))
+        padded = (packetlen + 7) & ~7
+        occupied = padded + 16
+        if magic != CCIF_PKG_HEADER or occupied > available:
+            raise ValueError("Invalid CCIF receive-ring header or packet length")
+        if struct.unpack("<II", span(read + 8 + padded, 8)) != (CCIF_PKG_FOOTER, CCIF_PKG_FOOTER):
+            raise ValueError("Invalid CCIF receive-ring footer")
+        packet = span(read + 8, packetlen)
+        self.parent.write_raw(self.offset, 4, (read + occupied) % length)
         return packet
 
     def writePacket(self, packet):
@@ -444,7 +414,7 @@ CCCI_RPC_TX = 33
 
 
 class PCCIF_Periph(PassthroughPeripheral):
-    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, ipc_dispatcher=None, **kwargs):
+    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, ipc_dispatcher=None, closed_ports=None, **kwargs):
         super().__init__(name, address, size, **kwargs)
 
         self.pccifid = pccifid
@@ -457,6 +427,9 @@ class PCCIF_Periph(PassthroughPeripheral):
         if ipc_dispatcher is not None and not isinstance(ipc_dispatcher, IPCDispatcher):
             raise ValueError("ipc_dispatcher must be an IPCDispatcher instance")
         self.ipc_dispatcher = ipc_dispatcher
+        if closed_ports is not None and not isinstance(closed_ports, ClosedAPPorts):
+            raise ValueError("closed_ports must be a ClosedAPPorts instance")
+        self.closed_ports = closed_ports
 
     # 0 CON, 4 BUSY, C TCHNUM, 14 ACK, 100 CHDATA
     def hw_read(self, offset, size):
@@ -501,37 +474,20 @@ class PCCIF_Periph(PassthroughPeripheral):
                     )
                     assert False
                 ring = Ringbuf(self.ringbuffer, self.ringbuffer.offsets[value])
-                ring_metadata = {"ring_index": value, "ring_offset": ring.offset,
-                                 "read": self.ringbuffer.read_raw(ring.offset, 4),
-                                 "write": self.ringbuffer.read_raw(ring.offset + 4, 4),
-                                 "capacity": self.ringbuffer.read_raw(ring.offset + 8, 4)}
-                packet = bytes(ring.readPacket())
-                metadata = dict(packet_metadata(packet), **ring_metadata)
-                if not metadata["header_complete"]:
-                    self.log.error("Truncated CCCI header metadata=%s", json.dumps(metadata, sort_keys=True))
-                    raise ValueError("Truncated CCCI header")
-                channel = struct.unpack("<H", packet[8:10])[0]
-                self.log.debug(f"incoming packet channel {channel:x}")
-                if channel == 0x20:  # CCCI_RPC_RX
-                    self.handleRPCPacket(ring, packet)
-                elif channel == 0xE:  # CCCI_FS_RX
-                    self.handleFSPacket(ring, packet)
-                elif channel == 0x0:  # CCCI_CONTROL_RX
-                    self.handleControlPacket(ring, packet)
-                elif channel == 0x22 and self.ipc_dispatcher is not None:
-                    metadata["ipc"] = ipc_metadata(packet)
-                    try:
-                        disposition = self.ipc_dispatcher.receive(packet)
-                    except (ValueError, NotImplementedError):
-                        self.log.error("Rejected IPC metadata=%s", json.dumps(metadata, sort_keys=True))
-                        raise
-                    self.log.info("IPC disposition metadata=%s", json.dumps(
-                        dict(metadata, disposition=disposition), sort_keys=True))
+                capacity = self.ringbuffer.read_raw(ring.offset + 8, 4)
+                # A doorbell can cover several queued packets. Bound the work;
+                # never silently leave the rest behind or loop without limit.
+                for _ in range(capacity // 16 + 1):
+                    ring_metadata = {"ring_index": value, "ring_offset": ring.offset,
+                                     "read": self.ringbuffer.read_raw(ring.offset, 4),
+                                     "write": self.ringbuffer.read_raw(ring.offset + 4, 4),
+                                     "capacity": capacity}
+                    packet = ring.readPacket()
+                    if packet is None:
+                        break
+                    self.dispatch_ccci_packet(ring, bytes(packet), ring_metadata)
                 else:
-                    if channel == 0x22:
-                        metadata["ipc"] = ipc_metadata(packet)
-                    self.log.error("Unknown channel metadata=%s", json.dumps(metadata, sort_keys=True))
-                    assert False
+                    raise RuntimeError("CCIF receive ring exceeded bounded drain budget")
         elif offset == 0x14:
             # ACK
             self.log.debug(f"ACK {self.rchnum:x}")
@@ -553,6 +509,37 @@ class PCCIF_Periph(PassthroughPeripheral):
             self.log.error(f"PCCIF write {offset:x} {value:x}")
             assert False
         return True
+
+    def dispatch_ccci_packet(self, ring, packet, ring_metadata):
+        metadata = dict(packet_metadata(packet), **ring_metadata)
+        if not metadata["header_complete"]:
+            self.log.error("Truncated CCCI header metadata=%s", json.dumps(metadata, sort_keys=True))
+            raise ValueError("Truncated CCCI header")
+        channel = metadata["channel"]
+        if channel == 0x20:
+            self.handleRPCPacket(ring, packet)
+        elif channel == 0xe:
+            self.handleFSPacket(ring, packet)
+        elif channel == 0:
+            self.handleControlPacket(ring, packet)
+        elif channel == 0x22 and getattr(self, "ipc_dispatcher", None) is not None:
+            metadata["ipc"] = ipc_metadata(packet)
+            try:
+                disposition = self.ipc_dispatcher.receive(packet)
+            except (ValueError, NotImplementedError):
+                self.log.error("Rejected IPC metadata=%s", json.dumps(metadata, sort_keys=True))
+                raise
+            self.log.info("IPC disposition metadata=%s", json.dumps(
+                dict(metadata, disposition=disposition), sort_keys=True))
+        elif getattr(self, "closed_ports", None) is not None and self.closed_ports.accepts(channel):
+            disposition = self.closed_ports.receive(packet)
+            self.log.info("Closed port disposition metadata=%s", json.dumps(
+                dict(metadata, disposition=disposition), sort_keys=True))
+        else:
+            if channel == 0x22:
+                metadata["ipc"] = ipc_metadata(packet)
+            self.log.error("Unknown channel metadata=%s", json.dumps(metadata, sort_keys=True))
+            raise NotImplementedError("Unknown CCCI channel")
 
     def handleAMMS(self):
         AMMS_CMD_INIT = 1

@@ -34,6 +34,7 @@ from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
 from .hw.PCCIFPeripheral import PCCIF_Periph
 from .hw.ccci_ipc import unavailable_wmt_dispatcher
+from .hw.ccci_ports import ClosedAPPorts
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
 
 MAGIC = 0x58881688
@@ -82,6 +83,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "ccci_closed_ports": {
+            "type": PurePath, "default": None,
+            "help": "OPT-IN explicit unopened AP character-port profile; no application replies",
+        },
         "ccci_ipc": {
             "type": str, "choices": ["disabled", "wmt-unavailable"], "default": "disabled",
             "help": "OPT-IN analysis WMT/STP-unavailable sink; no application reply or real AP peer",
@@ -476,6 +481,14 @@ class MTKLoader(firmwire.loader.Loader):
             raise ValueError("Unsupported CCCI IPC policy")
         if ipc_mode != "disabled" and self.boot_mode != "native":
             raise ValueError("CCCI IPC analysis requires native boot mode")
+        ports_path = self.loader_args.get("ccci_closed_ports")
+        ports_profile = None
+        if ports_path is not None:
+            if self.boot_mode != "native":
+                raise ValueError("Closed AP ports require native boot mode")
+            with open(ports_path) as source:
+                ports_profile = json.load(source)
+            ClosedAPPorts(ports_profile)  # Validate before creating any mappings.
         self.build_peripheral_maps()
 
         ########################
@@ -483,15 +496,20 @@ class MTKLoader(firmwire.loader.Loader):
         ########################
 
         for peripheral in self.modem_soc.peripherals:
-            if (ipc_mode != "disabled" and issubclass(peripheral._cls, PCCIF_Periph)
+            if ((ipc_mode != "disabled" or ports_profile is not None) and issubclass(peripheral._cls, PCCIF_Periph)
                     and peripheral._attr.get("pccifid") == 0):
-                attributes = dict(peripheral._attr, ipc_dispatcher=unavailable_wmt_dispatcher())
+                attributes = dict(peripheral._attr)
+                if ipc_mode != "disabled":
+                    attributes["ipc_dispatcher"] = unavailable_wmt_dispatcher()
+                    self.capability_report["ccci_ipc"] = {
+                        "policy": "wmt-stp-unavailable-analysis/v1", "abi": "ccci-ipc-ilm32/v1",
+                        "peer_connected": False, "application_verified": False,
+                        "response_supported": False,
+                    }
+                if ports_profile is not None:
+                    attributes["closed_ports"] = ClosedAPPorts(ports_profile)
+                    self.capability_report["ccci_closed_ports"] = attributes["closed_ports"].facts()
                 self.create_peripheral(peripheral, peripheral._address, peripheral._size, **attributes)
-                self.capability_report["ccci_ipc"] = {
-                    "policy": "wmt-stp-unavailable-analysis/v1", "abi": "ccci-ipc-ilm32/v1",
-                    "peer_connected": False, "application_verified": False,
-                    "response_supported": False,
-                }
                 self.write_capability_report()
             else:
                 self.create_soc_peripheral(peripheral)

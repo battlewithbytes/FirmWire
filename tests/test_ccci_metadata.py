@@ -44,7 +44,7 @@ class CCCIMetadataTests(unittest.TestCase):
         device = object.__new__(PCCIF_Periph)
         device.pccifid, device.ringbuffer = 0, parent
         device.log = logging.getLogger("ccci-real-ring-test")
-        with self.assertLogs(device.log,level="ERROR") as logs, self.assertRaises(AssertionError):
+        with self.assertLogs(device.log,level="ERROR") as logs, self.assertRaises(NotImplementedError):
             device.hw_write(0xc,4,0)
         facts = json.loads(logs.output[0].split("metadata=",1)[1])
         self.assertEqual((facts["read"],facts["write"],facts["capacity"]),(0,40,256))
@@ -78,9 +78,9 @@ class CCCIMetadataTests(unittest.TestCase):
             packet = struct.pack("<IIHHI",0,24,channel,0,0)+b"secret!!"
             with patch("firmwire.vendor.mtk.hw.PCCIFPeripheral.Ringbuf") as cls:
                 cls.return_value.offset = 8
-                cls.return_value.readPacket.return_value = packet
+                cls.return_value.readPacket.side_effect = [packet, None]
                 if handler is None:
-                    with self.assertLogs(device.log,level="ERROR") as logs, self.assertRaises(AssertionError):
+                    with self.assertLogs(device.log,level="ERROR") as logs, self.assertRaises(NotImplementedError):
                         device.hw_write(0xc,4,0)
                     facts = json.loads(logs.output[0].split("metadata=",1)[1])
                     self.assertEqual((facts["ring_index"],facts["channel"],facts["packet_bytes"]),(0,0x88,24))

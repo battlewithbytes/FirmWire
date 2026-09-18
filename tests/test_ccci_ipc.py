@@ -114,7 +114,7 @@ class IPCServiceTests(unittest.TestCase):
         self.assertNotIn("private-data", str(logs.output))
         device.ipc_dispatcher = None
         parent.write_raw(8, 4, 0)
-        with self.assertLogs(device.log, level="ERROR"), self.assertRaises(AssertionError):
+        with self.assertLogs(device.log, level="ERROR"), self.assertRaises(NotImplementedError):
             device.hw_write(0xc, 4, 0)
 
     def test_loader_policy_is_explicit_native_and_instance_local(self):
