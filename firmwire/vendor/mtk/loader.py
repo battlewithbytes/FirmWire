@@ -32,6 +32,7 @@ from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from .hw.BSIPeripheral import BSIImmediatePeripheral
 from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
+from .hw.lte_timer import MTKLTETimerRRPeripheral
 from .hw.PCCIFPeripheral import PCCIF_Periph
 from .hw.ccci_ipc import unavailable_wmt_dispatcher
 from .hw.ccci_ports import ClosedAPPorts
@@ -83,6 +84,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "lte_timer": {
+            "type": str, "choices": ["disabled", "93xx-rr-config"], "default": "disabled",
+            "help": "OPT-IN LTE RR configuration only; rejects clock/trigger/IRQ operations",
+        },
         "ccci_closed_ports": {
             "type": PurePath, "default": None,
             "help": "OPT-IN explicit unopened AP character-port profile; no application replies",
@@ -517,6 +522,20 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        lte_abi = self.loader_args.get("lte_timer", "disabled")
+        if lte_abi not in ("disabled", "93xx-rr-config"):
+            raise ValueError("Unsupported LTE timer ABI")
+        if lte_abi != "disabled":
+            if self.boot_mode != "native":
+                raise ValueError("LTE timer configuration analysis requires native boot mode")
+            self.add_memory_range(0xA6090000, 0x2000, name="LTE_TIMER",
+                                  emulate=MTKLTETimerRRPeripheral, permissions="rw-")
+            self.capability_report["lte_timer"] = {
+                "abi": lte_abi, "physical_base": 0xA6090000,
+                "configuration_only": True, "clock_supported": False,
+                "rr_trigger_supported": False, "guest_irq_routed": False,
+            }
+            self.write_capability_report()
         control_abi = self.loader_args.get("idc_control", "disabled")
         if control_abi not in ("disabled", "mt6768-counter"):
             raise ValueError("Unsupported IDC control ABI")

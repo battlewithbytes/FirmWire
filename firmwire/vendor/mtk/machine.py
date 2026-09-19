@@ -781,10 +781,10 @@ class MT6878Machine(FirmWireEmu):
                 install_v0_trace(self.panda, config["v0_trace"], report, context_labels,
                                  self.loader.write_capability_report)
             requested_controls = config.get("peripheral_controls", [])
-            if (not isinstance(requested_controls, list) or len(requested_controls) > 3
-                    or any(name not in ("AES_TOP0", "MODEML1_AO_BSI_MM_2", "IDC_CTRL") for name in requested_controls)
+            if (not isinstance(requested_controls, list) or len(requested_controls) > 4
+                    or any(name not in ("AES_TOP0", "MODEML1_AO_BSI_MM_2", "IDC_CTRL", "LTE_TIMER") for name in requested_controls)
                     or len(set(requested_controls)) != len(requested_controls)):
-                raise ValueError("Only explicit AES_TOP0/BSI/IDC_CTRL control observers are supported")
+                raise ValueError("Only explicit AES_TOP0/BSI/IDC_CTRL/LTE_TIMER control observers are supported")
             for name in requested_controls:
                 peripheral = self.peripheral_map.get(name)
                 if peripheral is None or not hasattr(peripheral, "enable_control_observer"):
