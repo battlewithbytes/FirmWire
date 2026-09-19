@@ -41,6 +41,12 @@ Live acceptance must observe all eight original writes with unchanged firmware
 and DRDI readback. A later strict stop is progress only through configuration,
 not a modem boot or interrupt milestone.
 
+With the explicit control observer enabled, unsupported accesses log a bounded
+`LTE RR unsupported metadata=` snapshot before raising. A forwarded-MMIO worker
+failure may prevent the next periodic capability sample; that older sample must
+not be presented as failure-time state. Logging uses only local device state,
+never synchronous guest-memory reads from the blocked MMIO worker.
+
 Next review the initializer's IRQ routing/configuration words at +0x4a4 onward,
 then clock/trigger/expiry and interrupt-controller wiring independently.
 Do not turn the entire register aperture into RAM or patch the post-fault PCCIF

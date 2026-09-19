@@ -4,6 +4,8 @@ Set/Dump RR Value access two four-word banks with stride 0x14. Trigger RR
 Event uses the preceding words (+0x58/+0x6c), intentionally NOT accepted.
 See docs/lte-timer.md for exact-ROM and sibling-symbol evidence.
 """
+import json
+
 from firmwire.hw.configuration import ConfigurationRegisters
 from firmwire.hw.peripheral import FirmWirePeripheral
 
@@ -16,15 +18,32 @@ class MTKLTETimerRRPeripheral(FirmWirePeripheral):
             raise ValueError("LTE RR configuration window is too small")
         super().__init__(name, address, size, **kwargs)
         self.config = ConfigurationRegisters(self.RR_OFFSETS)
+        self._observe_control = False
 
     def hw_read(self, offset, size):
-        return self.config.read(offset, size)
+        try:
+            return self.config.read(offset, size)
+        except NotImplementedError:
+            self._record_stop()
+            raise
 
     def hw_write(self, offset, size, value):
-        return self.config.write(offset, size, value)
+        try:
+            return self.config.write(offset, size, value)
+        except NotImplementedError:
+            self._record_stop()
+            raise
 
     def enable_control_observer(self):
-        pass
+        self._observe_control = True
+
+    def _record_stop(self):
+        # A failed forwarded MMIO stalls before the next block callback. Keep
+        # this final snapshot in the log, not a stale periodic report. Do not
+        # read guest RAM or call QEMU synchronously from its MMIO worker.
+        if self._observe_control:
+            self.log.error("LTE RR unsupported metadata=%s",
+                           json.dumps(self.control_observation(), sort_keys=True))
 
     def control_observation(self):
         return dict(self.config.facts(), kind="93xx-lte-rr-configuration/v1",

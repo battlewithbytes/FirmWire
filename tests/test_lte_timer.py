@@ -1,3 +1,4 @@
+import json
 import pickle
 import random
 import unittest
@@ -102,3 +103,19 @@ class LTETimerTests(unittest.TestCase):
             loader.add_memory_range = Mock()
             with self.assertRaises(ValueError): loader.build_peripheral_maps()
             loader.add_memory_range.assert_not_called()
+
+    def test_failure_snapshot_is_opt_in_and_precedes_worker_exception(self):
+        device = self.device()
+        device.log = Mock()
+        with self.assertRaises(NotImplementedError): device.hw_write(0x4a4, 4, 1)
+        device.log.error.assert_not_called()
+        device.enable_control_observer()
+        device.hw_write(0x5c, 4, 0x12345678)
+        with self.assertRaises(NotImplementedError): device.hw_write(0x4a4, 4, 1)
+        event = json.loads(device.log.error.call_args.args[1])
+        self.assertEqual(event["writes"], 1)
+        self.assertEqual(event["registers"][0]["value"], 0x12345678)
+        self.assertEqual(event["last_unsupported"]["offset"], 0x4a4)
+        with self.assertRaises(NotImplementedError): device.hw_read(0x60, 4)
+        event = json.loads(device.log.error.call_args.args[1])
+        self.assertEqual(event["last_unsupported"]["reason"], "reset value unknown")
