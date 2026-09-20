@@ -107,6 +107,22 @@ class CheckpointAdapterTests(unittest.TestCase):
             self.assertEqual(execution["cpu_exceptions"]["first"][0]["preceding_unassigned_io"][-1]["physical_address"],0x160b0024)
             self.assertTrue(self.saved[-1]["ram_observer"]["unassigned_io"])
 
+    def test_d2bif_observer_is_explicit_and_keeps_analysis_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = self.make_machine(self.profile(directory, peripheral_controls=["D2BIF", "LTE_TIMER"]))
+            facts = {"analysis_only": True, "semantics_verified": False, "boot_verified": False}
+            for name in ("D2BIF", "LTE_TIMER"):
+                machine.peripheral_map[name] = SimpleNamespace(
+                    enable_control_observer=Mock(), control_observation=lambda: dict(facts))
+            install(machine)
+            self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
+            for name in ("D2BIF", "LTE_TIMER"):
+                machine.peripheral_map[name].enable_control_observer.assert_called_once()
+                self.assertEqual(self.saved[-1]["execution"]["peripheral_controls"][name], facts)
+        for names in (["D2BIF"], ["D2BIF", "D2BIF"], ["D2BIF", "unknown"]):
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                install(self.make_machine(self.profile(directory, peripheral_controls=names)))
+
     def test_io_observer_rejects_truthy_non_boolean_and_requires_exceptions(self):
         for extra in ({"unassigned_io":"true"},{"unassigned_io":1},{"unassigned_io":True},
                       {"unassigned_io":True,"cpu_exceptions":False}):
