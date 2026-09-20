@@ -9,12 +9,13 @@ import time
 import unittest
 
 
-def child(directory, control=False, analysis=False):
+def child(directory, control=False, analysis=False, cancel=False):
     from pandare import Panda
     from keystone import Ks, KS_ARCH_MIPS, KS_MODE_MIPS32, KS_MODE_LITTLE_ENDIAN
     from firmwire.vendor.mtk.machine import MT6878Machine
     from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral
     from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerInitStorageAnalysisPeripheral
+    from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerGroupCancelAnalysisPeripheral
     root = Path(directory)
     program = """
         li $t0, 0x400000
@@ -62,6 +63,17 @@ def child(directory, control=False, analysis=False):
         lw $v0, 0x4ec($t0)
         sw $v0, 0x1020($zero)
         """
+    if cancel:
+        program += """
+        li $t0, 0x400000
+        li $t1, 5
+        sw $t1, 0x1ba0($t0)
+        sw $zero, 0x1ba0($t0)
+        li $t0, 0x600000
+        li $t1, 8
+        sw $t1, 0x1bac($t0)
+        sw $zero, 0x1bac($t0)
+        """
     program += """
         li $t1, 1
         sw $t1, 0x1100($zero)
@@ -78,8 +90,15 @@ def child(directory, control=False, analysis=False):
     device_class = MTKLTETimerControlPeripheral if control else MTKLTETimerRRPeripheral
     if analysis:
         device_class = MTKLTETimerInitStorageAnalysisPeripheral
+    if cancel:
+        device_class = MTKLTETimerGroupCancelAnalysisPeripheral
     devices = {base: device_class("timer", base, 0x2000,
                firmwire_machine=object.__new__(MT6878Machine)) for base in (0x400000, 0x600000)}
+    if cancel:
+        # Test-only pending events, not injections into the real firmware boot.
+        for device in devices.values():
+            device.group_events.schedule(0, 0xf, 20)
+            device.group_events.schedule(1, 0xf, 20)
 
     @panda.cb_unassigned_io_write
     def write(cpu, pc, address, size, value):
@@ -104,6 +123,8 @@ def child(directory, control=False, analysis=False):
             report = dict(facts=[d.control_observation() for d in devices.values()],
                           words=[int.from_bytes(panda.physical_memory_read(x, 4), "little")
                                  for x in range(0x1000, 0x1024 if analysis else 0x1018 if control else 0x100c, 4)])
+            if cancel:
+                report["due"] = [d.group_events.take_due(20) for d in devices.values()]
             (root / "result.tmp").write_text(json.dumps(report))
             (root / "result.tmp").replace(root / "result.json")
 
@@ -126,11 +147,15 @@ class LTETimerNativeTests(unittest.TestCase):
     def test_guest_provisional_word_storage_is_labeled_and_isolated(self):
         self.run_case(True, True)
 
-    def run_case(self, control, analysis=False):
+    @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_LTE_TIMER") == "1", "requires development PANDA")
+    def test_guest_cancellation_removes_only_selected_events(self):
+        self.run_case(True, True, True)
+
+    def run_case(self, control, analysis=False, cancel=False):
         with tempfile.TemporaryDirectory(prefix="lte-timer-native-") as directory, tempfile.TemporaryFile(mode="w+") as log:
             result = Path(directory) / "result.json"
             proc = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()),
-                                     "--analysis-child" if analysis else "--control-child" if control else "--child", directory],
+                                     "--cancel-child" if cancel else "--analysis-child" if analysis else "--control-child" if control else "--child", directory],
                                     stdout=log, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 10
@@ -152,6 +177,12 @@ class LTETimerNativeTests(unittest.TestCase):
             expected_counts = [7, 2] if analysis else [5 if control else 2, 1]
             self.assertEqual([f["writes"] for f in report["facts"]], expected_counts)
             self.assertEqual([f["reads"] for f in report["facts"]], expected_counts)
+            if cancel:
+                expected = (((0, 1), (0, 3), (1, 0), (1, 1), (1, 2), (1, 3)),
+                            ((0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2)))
+                self.assertEqual([[(e["bank"], e["bit"]) for e in due] for due in report["due"]],
+                                 [list(rows) for rows in expected])
+                self.assertEqual([f["group_events"]["cancel_writes"] for f in report["facts"]], [2, 2])
             for facts in report["facts"]:
                 self.assertFalse(facts["clock_supported"])
                 self.assertFalse(facts["guest_irq_routed"])
@@ -163,7 +194,8 @@ class LTETimerNativeTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] in ("--child", "--control-child", "--analysis-child"):
-        child(sys.argv[2], sys.argv[1] != "--child", sys.argv[1] == "--analysis-child")
+    if len(sys.argv) == 3 and sys.argv[1] in ("--child", "--control-child", "--analysis-child", "--cancel-child"):
+        child(sys.argv[2], sys.argv[1] != "--child", sys.argv[1] in ("--analysis-child", "--cancel-child"),
+              sys.argv[1] == "--cancel-child")
     else:
         unittest.main()

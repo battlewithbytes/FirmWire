@@ -107,3 +107,38 @@ observations and native guest write/readback. They validate the implemented
 hypothesis, not real-silicon semantics. A write-only live run cannot distinguish
 retained storage from other no-immediate-effect behaviors. Progress past these
 writes is not evidence that timer expiry, IRQ routing or modem boot works.
+
+## Provisional group cancellation (not a running timer)
+
+`--mtk-loader-lte_timer 93xx-group-cancel-analysis` is a separate default-off,
+native-only profile. It inherits the unverified initialization storage above.
+Five command words at +0x1ba0 + group*12 cancel the selected queued events in
+that group. Zero cancels nothing; these words are not readable configuration.
+No expected guest value, ROM hash or program counter drives the device.
+
+The generic `MaskedEventQueue` supports configurable banks/bit widths, bounded
+state, opaque caller-supplied deadlines, cancellation, rescheduling, reset and
+due-event extraction. It has no MTK, MMIO, CPU, clock-thread or IRQ dependency.
+The family frontend supplies the five-bank/32-bit register layout. Cancellation
+does not acknowledge an already delivered interrupt. Queue operations must be
+serialized by their caller. No guest trigger or clock is wired yet; tests arm
+events directly only to prove cancellation cannot leave a stale queued expiry.
+
+Evidence: the first 74 bytes of the sibling `EL1D_TC_HW_Disable_All_IRQ` object
+body match uniquely and exactly in both Lagos and Coful, without relocations.
+The whole function does NOT match (its trace code differs). Independent Ghidra
+analysis resolves the same fourteen-write sequence in both ROMs: all ones then
+zero to each of the five group words, followed by +0x408/+0x40c mask/zero writes.
+Named sibling group trigger/retry routines also use the group cancellation
+words; this supports the cancellation interpretation, not complete silicon
+semantics. +0x408/+0x40c appear in additional trigger/retry paths and remain
+strictly unsupported, as do guest trigger, expiry, status and IRQ routing.
+
+Empty initial queue state and cancellation-on-nonzero-write are explicit
+analysis assumptions. Strobe edge/level behavior, reserved bits, pending IRQ
+acknowledgment and clock/IRQ mappings remain unknown. Metadata retains
+`semantics_verified: false`, `command_semantics_verified: false`,
+`boot_verified: false` and `guest_trigger_supported: false`.
+The first 32 cancellation writes and the failure snapshot log bounded queue
+state. A live write-only startup can establish passage through this model,
+not correct timer behavior on silicon or a fully booted modem.

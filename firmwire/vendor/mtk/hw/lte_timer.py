@@ -7,6 +7,7 @@ See docs/lte-timer.md for exact-ROM and sibling-symbol evidence.
 import json
 
 from firmwire.hw.configuration import ConfigurationRegisters
+from firmwire.hw.event_queue import MaskedEventQueue
 from firmwire.hw.peripheral import FirmWirePeripheral
 
 
@@ -133,3 +134,51 @@ class MTKLTETimerInitStorageAnalysisPeripheral(MTKLTETimerControlPeripheral):
                     hypothesis_reads=self.hypothesis_reads,
                     hypothesis_writes=self.hypothesis_writes,
                     hypothesis_trace=[dict(event) for event in self.hypothesis_trace])
+
+
+class MTKLTETimerGroupCancelAnalysisPeripheral(MTKLTETimerInitStorageAnalysisPeripheral):
+    """Cancellation-only command frontend; no guest trigger/clock/IRQ claim.
+
+    Each command bit cancels the corresponding queued event in that group.
+    A zero write cancels nothing; it is not stored as a configuration value.
+    Pending/delivered IRQ acknowledgments and +0x408/+0x40c remain unsupported.
+    Empty power-on event state and the inherited init words are analysis
+    assumptions. Guest scheduling remains strict until its format is reviewed.
+    """
+    GROUP_CANCEL_OFFSETS = tuple(0x1ba0 + group * 12 for group in range(5))
+    KIND = "93xx-lte-group-cancel-analysis/v1"
+
+    @classmethod
+    def analysis_facts(cls):
+        facts = super().analysis_facts()
+        facts.update(configuration_only=False, group_cancel_supported=True, guest_trigger_supported=False,
+                     command_semantics_verified=False, empty_initial_events_assumed=True,
+                     cancellation_model="selected-queued-events-on-write/v1",
+                     unresolved_command_facts=["strobe edge/level behavior", "reserved event bits",
+                                               "pending IRQ acknowledgment", "clock and IRQ mapping"])
+        return facts
+
+    def __init__(self, name, address, size, **kwargs):
+        if size < max(self.GROUP_CANCEL_OFFSETS) + 4:
+            raise ValueError("LTE group command window is too small")
+        super().__init__(name, address, size, **kwargs)
+        self.group_events = MaskedEventQueue(len(self.GROUP_CANCEL_OFFSETS), width=32)
+        self.cancel_trace = []
+
+    def hw_write(self, offset, size, value):
+        if type(offset) is int and offset in self.GROUP_CANCEL_OFFSETS:
+            if type(size) is not int or size != 4 or type(value) is not int or not 0 <= value < 2**32:
+                raise ValueError("group cancel requires an aligned unsigned 32-bit write")
+            bank = self.GROUP_CANCEL_OFFSETS.index(offset)
+            removed = self.group_events.cancel(bank, value)
+            self.cancel_trace.append(dict(offset=offset, mask=value, cancelled_mask=removed))
+            del self.cancel_trace[:-32]
+            if self.group_events.cancel_writes <= 32:
+                self.log.warning("LTE group cancel metadata=%s",
+                                 json.dumps(self.control_observation(), sort_keys=True))
+            return True
+        return super().hw_write(offset, size, value)
+
+    def control_observation(self):
+        return dict(super().control_observation(), group_events=self.group_events.facts(),
+                    cancel_trace=[dict(event) for event in self.cancel_trace])

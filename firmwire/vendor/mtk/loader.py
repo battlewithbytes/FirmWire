@@ -34,7 +34,7 @@ from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
 from .hw.d2bif import MTKD2BIFStorageAnalysisPeripheral
 from .hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral,
-                           MTKLTETimerInitStorageAnalysisPeripheral)
+                           MTKLTETimerInitStorageAnalysisPeripheral, MTKLTETimerGroupCancelAnalysisPeripheral)
 from .hw.PCCIFPeripheral import PCCIF_Periph
 from .hw.ccci_ipc import unavailable_wmt_dispatcher
 from .hw.ccci_ports import ClosedAPPorts
@@ -91,8 +91,8 @@ class MTKLoader(firmwire.loader.Loader):
             "help": "OPT-IN UNVERIFIED D2BIF two-word storage hypothesis; no DMA or IRQ effects",
         },
         "lte_timer": {
-            "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis"], "default": "disabled",
-            "help": "OPT-IN LTE configuration; init-storage-analysis is an UNVERIFIED no-effects hypothesis",
+            "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis", "93xx-group-cancel-analysis"], "default": "disabled",
+            "help": "OPT-IN LTE profiles; analysis variants have UNVERIFIED init storage and optional queued-event cancellation, not a running timer",
         },
         "ccci_closed_ports": {
             "type": PurePath, "default": None,
@@ -543,7 +543,8 @@ class MTKLoader(firmwire.loader.Loader):
         lte_abi = self.loader_args.get("lte_timer", "disabled")
         lte_classes = {"93xx-rr-config": MTKLTETimerRRPeripheral,
                        "93xx-control": MTKLTETimerControlPeripheral,
-                       "93xx-init-storage-analysis": MTKLTETimerInitStorageAnalysisPeripheral}
+                       "93xx-init-storage-analysis": MTKLTETimerInitStorageAnalysisPeripheral,
+                       "93xx-group-cancel-analysis": MTKLTETimerGroupCancelAnalysisPeripheral}
         if lte_abi != "disabled" and lte_abi not in lte_classes:
             raise ValueError("Unsupported LTE timer ABI")
         if lte_abi != "disabled":
@@ -557,7 +558,7 @@ class MTKLoader(firmwire.loader.Loader):
                 "configuration_only": True, "clock_supported": False,
                 "rr_trigger_supported": False, "guest_irq_routed": False,
             }
-            if lte_abi == "93xx-init-storage-analysis":
+            if issubclass(lte_cls, MTKLTETimerInitStorageAnalysisPeripheral):
                 self.capability_report["lte_timer"].update(lte_cls.analysis_facts())
             self.write_capability_report()
         control_abi = self.loader_args.get("idc_control", "disabled")
