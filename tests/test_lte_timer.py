@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock
 
 from firmwire.hw.configuration import ConfigurationRegisters
-from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerRRPeripheral
+from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral
 from firmwire.vendor.mtk.loader import MTKLoader
 from firmwire.vendor.mtk.machine import MT6878Machine
 
@@ -85,7 +85,7 @@ class LTETimerTests(unittest.TestCase):
 
     def test_loader_selection_is_explicit_and_native_only(self):
         self.assertEqual(MTKLoader.LOADER_ARGS["lte_timer"]["default"], "disabled")
-        for abi in ("disabled", "93xx-rr-config"):
+        for abi in ("disabled", "93xx-rr-config", "93xx-control"):
             loader = object.__new__(MTKLoader)
             loader.loader_args, loader.boot_mode = {"lte_timer": abi}, "native"
             loader.capability_report = {}
@@ -96,8 +96,10 @@ class LTETimerTests(unittest.TestCase):
             mappings = {c.args[0]: c.kwargs for c in loader.add_memory_range.call_args_list}
             self.assertEqual(0xa6090000 in mappings, abi != "disabled")
             if abi != "disabled":
-                self.assertIs(mappings[0xa6090000]["emulate"], MTKLTETimerRRPeripheral)
-        for abi, mode in (("unknown", "native"), ("93xx-rr-config", "rehosted")):
+                expected = MTKLTETimerControlPeripheral if abi == "93xx-control" else MTKLTETimerRRPeripheral
+                self.assertIs(mappings[0xa6090000]["emulate"], expected)
+        for abi, mode in (("unknown", "native"), ("93xx-rr-config", "rehosted"),
+                          ("93xx-control", "rehosted")):
             loader = object.__new__(MTKLoader)
             loader.loader_args, loader.boot_mode = {"lte_timer": abi}, mode
             loader.add_memory_range = Mock()
@@ -119,3 +121,57 @@ class LTETimerTests(unittest.TestCase):
         with self.assertRaises(NotImplementedError): device.hw_read(0x60, 4)
         event = json.loads(device.log.error.call_args.args[1])
         self.assertEqual(event["last_unsupported"]["reason"], "reset value unknown")
+
+
+class LTETimerControlTests(unittest.TestCase):
+    def device(self, base=0x400000):
+        return MTKLTETimerControlPeripheral("timer", base, 0x2000,
+                                           firmwire_machine=object.__new__(MT6878Machine))
+
+    def test_configuration_readback_masks_and_instance_isolation(self):
+        a, b = self.device(), self.device(0x800000)
+        rng = random.Random(521)
+        for offset in a.CONFIG_OFFSETS:
+            with self.assertRaises(NotImplementedError): a.hw_read(offset, 4)
+            value = rng.getrandbits(32)
+            a.hw_write(offset, 4, value)
+            self.assertEqual(a.hw_read(offset, 4), value)
+            a.hw_write(offset, 4, 0)
+            self.assertEqual(a.hw_read(offset, 4), 0)
+            a.hw_write(offset, 4, value)
+            self.assertEqual(a.hw_read(offset, 4), value)
+        self.assertEqual(len(a.CONFIG_OFFSETS), 33)
+        self.assertEqual(a.control_observation()["writes"], 99)
+        self.assertTrue(all(r["value"] is None for r in b.control_observation()["registers"]))
+        self.assertEqual(pickle.loads(pickle.dumps(a.config)).facts(), a.config.facts())
+        a.config.reset()
+        self.assertEqual(a.config.facts(), b.config.facts())
+
+    def test_status_clear_clock_and_group_trigger_are_not_storage(self):
+        a = self.device()
+        for offset in (0, 4, 8, 0x10, 0x58, 0x6c, 0x408, 0x40c, 0x49c,
+                       *range(0x4c4, 0x4f4, 4), 0x1b54, 0x1b98, 0x1b9c, 0x1ba0, 0x1ffc):
+            for value in (0, 1, 0xffffffff):
+                with self.assertRaises(NotImplementedError): a.hw_write(offset, 4, value)
+            with self.assertRaises(NotImplementedError): a.hw_read(offset, 4)
+        self.assertEqual(a.control_observation()["writes"], 0)
+        for key in ("clock_supported", "rr_trigger_supported", "guest_irq_routed",
+                    "irq_status_supported", "mode_semantics_verified", "boot_verified"):
+            self.assertFalse(a.control_observation()[key])
+
+    def test_snapshot_contains_programmed_masks_without_guessing_unwritten_words(self):
+        a = self.device()
+        a.log = Mock()
+        a.enable_control_observer()
+        for i, offset in enumerate(a.SOURCE_MASK_OFFSETS): a.hw_write(offset, 4, 1 << i)
+        with self.assertRaises(NotImplementedError): a.hw_write(0x4ec, 4, 0x3f)
+        self.assertEqual(a.log.error.call_args.args[0], "LTE control unsupported metadata=%s")
+        event = json.loads(a.log.error.call_args.args[1])
+        self.assertEqual(event["writes"], 8)
+        values = {r["offset"]: r["value"] for r in event["registers"]}
+        self.assertEqual([values[o] for o in a.SOURCE_MASK_OFFSETS], [1 << i for i in range(8)])
+        self.assertIsNone(values[0x4a0])
+        self.assertIsNone(values[0x1b58])
+        with self.assertRaises(ValueError):
+            MTKLTETimerControlPeripheral("short", 0, 0x1000,
+                                         firmwire_machine=object.__new__(MT6878Machine))

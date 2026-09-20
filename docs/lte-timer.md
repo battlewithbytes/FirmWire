@@ -1,4 +1,4 @@
-# LTE timer: RR configuration boundary
+# LTE timer: configuration boundary
 
 `--mtk-loader-lte_timer 93xx-rr-config` explicitly selects a native-analysis
 subset. Default is `disabled`. This is **not a working timer**.
@@ -52,3 +52,33 @@ then clock/trigger/expiry and interrupt-controller wiring independently.
 Do not turn the entire register aperture into RAM or patch the post-fault PCCIF
 notification 16 into an ordinary ring. No new mtkloader parser requirement has
 been established by this register-behavior work.
+
+## Optional control configuration subset
+
+`--mtk-loader-lte_timer 93xx-control` extends the RR subset with eight source
+bitmaps at +0x4a4..+0x4c0, mode-bit storage at +0x4a0, and sixteen group-offset
+words at +0x1b58..+0x1b94. It remains default-off and native-only. All values come
+from guest writes. Unwritten words have unknown reset values; reads fail.
+The older `93xx-rr-config` selection retains its original strict boundary.
+
+The sibling V110.6 `libel1d.a:ltchwctrl.obj` initializer matches the target at
+ROM offset 0x3229ec under relocation-aware comparison. Its named mask helper
+writes zero to disable one output; unmask restores the firmware-computed
+source bitmap. Mode helpers read/modify/write +0x4a0. The named helper bodies
+themselves did **not** match the target: these are sibling behavioral evidence,
+not exact-target symbol matches or universal-MTK register claims. Mode bits'
+edge/level meaning is unverified and not interpreted by this implementation.
+
+Lagos builds the eight masks in RAM from its own sixteen mapping bytes before
+writing the registers. No table is injected or synthesized. Group parameters
+are copied by the initializer from its own ROM. Group command registers start
+at +0x1b98 and are excluded. Status words +0x4c4..+0x4e0 and writes +0x4ec/+0x4f0
+remain unsupported: seeing a write of 0x3f does not establish storage, W1C, or
+strobe semantics. Clock, trigger, expiry and actual interrupt routing are also
+still unsupported. This is a configuration milestone, not a running timer.
+
+Control failure snapshots use `LTE control unsupported metadata=`. Tests cover
+all 33 offsets, varied values/bases, unknown-reset reads, command exclusions,
+snapshot/reset isolation, and native guest source-mask program/clear/restore.
+The saved-live gate additionally derives the expected masks from a hash-verified
+target ROM; those exact-image constants are test oracles, never device defaults.

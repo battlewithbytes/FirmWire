@@ -32,7 +32,7 @@ from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from .hw.BSIPeripheral import BSIImmediatePeripheral
 from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
-from .hw.lte_timer import MTKLTETimerRRPeripheral
+from .hw.lte_timer import MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral
 from .hw.PCCIFPeripheral import PCCIF_Periph
 from .hw.ccci_ipc import unavailable_wmt_dispatcher
 from .hw.ccci_ports import ClosedAPPorts
@@ -85,8 +85,8 @@ class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
         "lte_timer": {
-            "type": str, "choices": ["disabled", "93xx-rr-config"], "default": "disabled",
-            "help": "OPT-IN LTE RR configuration only; rejects clock/trigger/IRQ operations",
+            "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control"], "default": "disabled",
+            "help": "OPT-IN reviewed LTE configuration; rejects unreviewed clock/trigger/status operations",
         },
         "ccci_closed_ports": {
             "type": PurePath, "default": None,
@@ -523,13 +523,14 @@ class MTKLoader(firmwire.loader.Loader):
 
     def build_peripheral_maps(self):
         lte_abi = self.loader_args.get("lte_timer", "disabled")
-        if lte_abi not in ("disabled", "93xx-rr-config"):
+        if lte_abi not in ("disabled", "93xx-rr-config", "93xx-control"):
             raise ValueError("Unsupported LTE timer ABI")
         if lte_abi != "disabled":
             if self.boot_mode != "native":
                 raise ValueError("LTE timer configuration analysis requires native boot mode")
+            lte_cls = MTKLTETimerControlPeripheral if lte_abi == "93xx-control" else MTKLTETimerRRPeripheral
             self.add_memory_range(0xA6090000, 0x2000, name="LTE_TIMER",
-                                  emulate=MTKLTETimerRRPeripheral, permissions="rw-")
+                                  emulate=lte_cls, permissions="rw-")
             self.capability_report["lte_timer"] = {
                 "abi": lte_abi, "physical_base": 0xA6090000,
                 "configuration_only": True, "clock_supported": False,
