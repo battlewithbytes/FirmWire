@@ -74,3 +74,62 @@ class MTKLTETimerControlPeripheral(MTKLTETimerRRPeripheral):
         return dict(super().control_observation(), source_mask_storage=True,
                     group_offset_storage=True, irq_mode_storage=True,
                     irq_status_supported=False, mode_semantics_verified=False)
+
+
+class MTKLTETimerInitStorageAnalysisPeripheral(MTKLTETimerControlPeripheral):
+    """Provisional H0: two initialization words retain writes without effects.
+
+    This is NOT a reviewed register contract. No enable/ack/selector meaning
+    is assigned to individual bits. Arbitrary guest words are retained;
+    unwritten reads, other registers and non-word accesses remain strict.
+    CPU PCs, firmware identities and expected initialization values do not
+    participate in this model. Selection must be explicit and analysis-only.
+    """
+    HYPOTHESIS_OFFSETS = (0x4ec, 0x4f0)
+    CONFIG_OFFSETS = MTKLTETimerControlPeripheral.CONFIG_OFFSETS + HYPOTHESIS_OFFSETS
+    KIND = "93xx-lte-init-storage-analysis/v1"
+    STOP_LABEL = "LTE analysis unsupported metadata=%s"
+
+    @classmethod
+    def analysis_facts(cls):
+        return dict(analysis_only=True, hypothesis="init-word-storage-no-effects/v1",
+                    semantics_verified=False, boot_verified=False,
+                    assumptions=["+0x4ec/+0x4f0 retain independent 32-bit writes",
+                                 "reads return the last write; reset values unknown",
+                                 "these writes have no timer or IRQ side effects"],
+                    hypothesis_offsets=list(cls.HYPOTHESIS_OFFSETS))
+
+    def __init__(self, name, address, size, **kwargs):
+        super().__init__(name, address, size, **kwargs)
+        self.hypothesis_reads = self.hypothesis_writes = 0
+        self.hypothesis_trace = []
+        self.log.warning("LTE PROVISIONAL ANALYSIS model=%s",
+                         json.dumps(self.analysis_facts(), sort_keys=True))
+
+    def _trace(self, direction, offset, value):
+        self.hypothesis_trace.append(dict(direction=direction, offset=offset, value=value))
+        del self.hypothesis_trace[:-32]
+        # Bounded logging even if firmware later polls these words indefinitely.
+        if self.hypothesis_reads + self.hypothesis_writes <= 32:
+            self.log.warning("LTE analysis access metadata=%s",
+                             json.dumps(self.control_observation(), sort_keys=True))
+
+    def hw_write(self, offset, size, value):
+        result = super().hw_write(offset, size, value)
+        if offset in self.HYPOTHESIS_OFFSETS:
+            self.hypothesis_writes = min(self.hypothesis_writes + 1, 2**64 - 1)
+            self._trace("write", offset, value)
+        return result
+
+    def hw_read(self, offset, size):
+        value = super().hw_read(offset, size)
+        if offset in self.HYPOTHESIS_OFFSETS:
+            self.hypothesis_reads = min(self.hypothesis_reads + 1, 2**64 - 1)
+            self._trace("read", offset, value)
+        return value
+
+    def control_observation(self):
+        return dict(super().control_observation(), **self.analysis_facts(),
+                    hypothesis_reads=self.hypothesis_reads,
+                    hypothesis_writes=self.hypothesis_writes,
+                    hypothesis_trace=[dict(event) for event in self.hypothesis_trace])

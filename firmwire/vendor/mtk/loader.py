@@ -32,7 +32,8 @@ from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from .hw.BSIPeripheral import BSIImmediatePeripheral
 from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
-from .hw.lte_timer import MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral
+from .hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral,
+                           MTKLTETimerInitStorageAnalysisPeripheral)
 from .hw.PCCIFPeripheral import PCCIF_Periph
 from .hw.ccci_ipc import unavailable_wmt_dispatcher
 from .hw.ccci_ports import ClosedAPPorts
@@ -85,8 +86,8 @@ class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
         "lte_timer": {
-            "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control"], "default": "disabled",
-            "help": "OPT-IN reviewed LTE configuration; rejects unreviewed clock/trigger/status operations",
+            "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis"], "default": "disabled",
+            "help": "OPT-IN LTE configuration; init-storage-analysis is an UNVERIFIED no-effects hypothesis",
         },
         "ccci_closed_ports": {
             "type": PurePath, "default": None,
@@ -523,12 +524,15 @@ class MTKLoader(firmwire.loader.Loader):
 
     def build_peripheral_maps(self):
         lte_abi = self.loader_args.get("lte_timer", "disabled")
-        if lte_abi not in ("disabled", "93xx-rr-config", "93xx-control"):
+        lte_classes = {"93xx-rr-config": MTKLTETimerRRPeripheral,
+                       "93xx-control": MTKLTETimerControlPeripheral,
+                       "93xx-init-storage-analysis": MTKLTETimerInitStorageAnalysisPeripheral}
+        if lte_abi != "disabled" and lte_abi not in lte_classes:
             raise ValueError("Unsupported LTE timer ABI")
         if lte_abi != "disabled":
             if self.boot_mode != "native":
                 raise ValueError("LTE timer configuration analysis requires native boot mode")
-            lte_cls = MTKLTETimerControlPeripheral if lte_abi == "93xx-control" else MTKLTETimerRRPeripheral
+            lte_cls = lte_classes[lte_abi]
             self.add_memory_range(0xA6090000, 0x2000, name="LTE_TIMER",
                                   emulate=lte_cls, permissions="rw-")
             self.capability_report["lte_timer"] = {
@@ -536,6 +540,8 @@ class MTKLoader(firmwire.loader.Loader):
                 "configuration_only": True, "clock_supported": False,
                 "rr_trigger_supported": False, "guest_irq_routed": False,
             }
+            if lte_abi == "93xx-init-storage-analysis":
+                self.capability_report["lte_timer"].update(lte_cls.analysis_facts())
             self.write_capability_report()
         control_abi = self.loader_args.get("idc_control", "disabled")
         if control_abi not in ("disabled", "mt6768-counter"):

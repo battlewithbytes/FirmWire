@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import Mock
 
 from firmwire.hw.configuration import ConfigurationRegisters
-from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral
+from firmwire.vendor.mtk.hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral,
+                                             MTKLTETimerInitStorageAnalysisPeripheral)
 from firmwire.vendor.mtk.loader import MTKLoader
 from firmwire.vendor.mtk.machine import MT6878Machine
 
@@ -85,7 +86,7 @@ class LTETimerTests(unittest.TestCase):
 
     def test_loader_selection_is_explicit_and_native_only(self):
         self.assertEqual(MTKLoader.LOADER_ARGS["lte_timer"]["default"], "disabled")
-        for abi in ("disabled", "93xx-rr-config", "93xx-control"):
+        for abi in ("disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis"):
             loader = object.__new__(MTKLoader)
             loader.loader_args, loader.boot_mode = {"lte_timer": abi}, "native"
             loader.capability_report = {}
@@ -97,9 +98,15 @@ class LTETimerTests(unittest.TestCase):
             self.assertEqual(0xa6090000 in mappings, abi != "disabled")
             if abi != "disabled":
                 expected = MTKLTETimerControlPeripheral if abi == "93xx-control" else MTKLTETimerRRPeripheral
+                if abi == "93xx-init-storage-analysis":
+                    expected = MTKLTETimerInitStorageAnalysisPeripheral
+                    facts = loader.capability_report["lte_timer"]
+                    self.assertTrue(facts["analysis_only"])
+                    self.assertFalse(facts["semantics_verified"])
+                    self.assertFalse(facts["boot_verified"])
                 self.assertIs(mappings[0xa6090000]["emulate"], expected)
         for abi, mode in (("unknown", "native"), ("93xx-rr-config", "rehosted"),
-                          ("93xx-control", "rehosted")):
+                          ("93xx-control", "rehosted"), ("93xx-init-storage-analysis", "rehosted")):
             loader = object.__new__(MTKLoader)
             loader.loader_args, loader.boot_mode = {"lte_timer": abi}, mode
             loader.add_memory_range = Mock()
@@ -175,3 +182,51 @@ class LTETimerControlTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MTKLTETimerControlPeripheral("short", 0, 0x1000,
                                          firmwire_machine=object.__new__(MT6878Machine))
+
+
+class LTEInitHypothesisTests(unittest.TestCase):
+    def device(self, base=0x400000):
+        device = MTKLTETimerInitStorageAnalysisPeripheral("experiment", base, 0x2000,
+                    firmwire_machine=object.__new__(MT6878Machine))
+        device.log = Mock()
+        return device
+
+    def test_independent_words_arbitrary_values_and_no_fabricated_effects(self):
+        a, b = self.device(), self.device(0x800000)
+        for offset in a.HYPOTHESIS_OFFSETS:
+            with self.assertRaises(NotImplementedError): a.hw_read(offset, 4)
+            for value in (0, 1, 0x3f, 0x40, 0x12345678, 0xffffffff):
+                a.hw_write(offset, 4, value)
+                self.assertEqual(a.hw_read(offset, 4), value)
+            with self.assertRaises(NotImplementedError): b.hw_read(offset, 4)
+        facts = a.control_observation()
+        self.assertEqual(facts["hypothesis_reads"], 12)
+        self.assertEqual(facts["hypothesis_writes"], 12)
+        self.assertTrue(facts["analysis_only"])
+        for key in ("semantics_verified", "boot_verified", "clock_supported",
+                    "guest_irq_routed", "expiry_fabricated", "irq_status_supported"):
+            self.assertFalse(facts[key])
+        a.hw_write(0x4ec, 4, 7)
+        self.assertEqual(a.hw_read(0x4f0, 4), 0xffffffff)
+
+    def test_rejections_and_bounded_detached_observations(self):
+        a = self.device()
+        for offset in (0, 0x4e4, 0x4e8, 0x4f4, 0x1b98):
+            with self.assertRaises(NotImplementedError): a.hw_write(offset, 4, 0x3f)
+        for size in (1, 2, 8):
+            with self.assertRaises(ValueError): a.hw_write(0x4ec, size, 7)
+        for value in (-1, 2**32, True):
+            with self.assertRaises(ValueError): a.hw_write(0x4ec, 4, value)
+        self.assertEqual(a.hypothesis_writes, 0)
+        for value in range(100): a.hw_write(0x4ec, 4, value)
+        self.assertEqual(len(a.hypothesis_trace), 32)
+        self.assertEqual(a.log.warning.call_count, 32)
+        facts = a.control_observation()
+        facts["hypothesis_trace"][0]["value"] = -1
+        self.assertEqual(a.hypothesis_trace[0]["value"], 68)
+        self.assertEqual(pickle.loads(pickle.dumps(a.config)).facts(), a.config.facts())
+        a.enable_control_observer()
+        with self.assertRaises(NotImplementedError): a.hw_write(0, 4, 1)
+        event = json.loads(a.log.error.call_args.args[1])
+        self.assertTrue(event["analysis_only"])
+        self.assertEqual(event["hypothesis_writes"], 100)

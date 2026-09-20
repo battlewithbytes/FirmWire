@@ -82,3 +82,28 @@ all 33 offsets, varied values/bases, unknown-reset reads, command exclusions,
 snapshot/reset isolation, and native guest source-mask program/clear/restore.
 The saved-live gate additionally derives the expected masks from a hash-verified
 target ROM; those exact-image constants are test oracles, never device defaults.
+
+## Provisional initialization experiment (not a verified hardware contract)
+
+`--mtk-loader-lte_timer 93xx-init-storage-analysis` explicitly opts into H0:
+the two words +0x4ec/+0x4f0 retain independent 32-bit writes without timer or
+IRQ side effects. Readback is the last supplied word; reset values stay unknown.
+This extends the existing sparse configuration primitive, not the entire MMIO
+window. It accepts arbitrary words, not just a particular image's initialization
+constant. Other unknown registers and access widths remain rejected.
+
+The profile is native-only, default-off, and does not alter `93xx-control`.
+Capabilities and snapshots include `analysis_only: true`, the versioned
+hypothesis and explicit assumptions, with `semantics_verified: false` and
+`boot_verified: false`. Startup logs carry `LTE PROVISIONAL ANALYSIS`; the
+first 32 accepted hypothesis accesses are logged, and the latest 32 retained
+with bounded read/write counters. The failure snapshot uses
+`LTE analysis unsupported metadata=`. No guest-memory reads or IRQ injection
+occur from the MMIO worker.
+
+Tests distinguish the provisional profile from both strict profiles, exercise
+arbitrary values, relocated independent instances, bad accesses, bounded
+observations and native guest write/readback. They validate the implemented
+hypothesis, not real-silicon semantics. A write-only live run cannot distinguish
+retained storage from other no-immediate-effect behaviors. Progress past these
+writes is not evidence that timer expiry, IRQ routing or modem boot works.
