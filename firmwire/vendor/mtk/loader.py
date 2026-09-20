@@ -32,6 +32,7 @@ from .hw.MML2MMUPeripheral import MML2MMU93Peripheral
 from .hw.BSIPeripheral import BSIImmediatePeripheral
 from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
+from .hw.d2bif import MTKD2BIFStorageAnalysisPeripheral
 from .hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral,
                            MTKLTETimerInitStorageAnalysisPeripheral)
 from .hw.PCCIFPeripheral import PCCIF_Periph
@@ -85,6 +86,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "d2bif": {
+            "type": str, "choices": ["disabled", "93xx-storage-analysis"], "default": "disabled",
+            "help": "OPT-IN UNVERIFIED D2BIF two-word storage hypothesis; no DMA or IRQ effects",
+        },
         "lte_timer": {
             "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis"], "default": "disabled",
             "help": "OPT-IN LTE configuration; init-storage-analysis is an UNVERIFIED no-effects hypothesis",
@@ -523,6 +528,18 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        d2bif_abi = self.loader_args.get("d2bif", "disabled")
+        if d2bif_abi not in ("disabled", "93xx-storage-analysis"):
+            raise ValueError("Unsupported D2BIF ABI")
+        if d2bif_abi != "disabled":
+            if self.boot_mode != "native":
+                raise ValueError("D2BIF storage analysis requires native boot mode")
+            self.add_memory_range(0xAB820000, 0x1000, name="D2BIF",
+                                  emulate=MTKD2BIFStorageAnalysisPeripheral, permissions="rw-")
+            self.capability_report["d2bif"] = dict(
+                MTKD2BIFStorageAnalysisPeripheral.analysis_facts(),
+                abi=d2bif_abi, physical_base=0xAB820000, size=0x1000)
+            self.write_capability_report()
         lte_abi = self.loader_args.get("lte_timer", "disabled")
         lte_classes = {"93xx-rr-config": MTKLTETimerRRPeripheral,
                        "93xx-control": MTKLTETimerControlPeripheral,
