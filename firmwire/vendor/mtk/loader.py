@@ -34,7 +34,8 @@ from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
 from .hw.d2bif import MTKD2BIFStorageAnalysisPeripheral
 from .hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral,
-                           MTKLTETimerInitStorageAnalysisPeripheral, MTKLTETimerGroupCancelAnalysisPeripheral)
+                           MTKLTETimerInitStorageAnalysisPeripheral, MTKLTETimerGroupCancelAnalysisPeripheral,
+                           MTKLTETimerEventCancelAnalysisPeripheral)
 from .hw.PCCIFPeripheral import PCCIF_Periph
 from .hw.ccci_ipc import unavailable_wmt_dispatcher
 from .hw.ccci_ports import ClosedAPPorts
@@ -91,7 +92,7 @@ class MTKLoader(firmwire.loader.Loader):
             "help": "OPT-IN UNVERIFIED D2BIF two-word storage hypothesis; no DMA or IRQ effects",
         },
         "lte_timer": {
-            "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis", "93xx-group-cancel-analysis"], "default": "disabled",
+            "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis", "93xx-group-cancel-analysis", "93xx-event-cancel-analysis"], "default": "disabled",
             "help": "OPT-IN LTE profiles; analysis variants have UNVERIFIED init storage and optional queued-event cancellation, not a running timer",
         },
         "ccci_closed_ports": {
@@ -544,7 +545,8 @@ class MTKLoader(firmwire.loader.Loader):
         lte_classes = {"93xx-rr-config": MTKLTETimerRRPeripheral,
                        "93xx-control": MTKLTETimerControlPeripheral,
                        "93xx-init-storage-analysis": MTKLTETimerInitStorageAnalysisPeripheral,
-                       "93xx-group-cancel-analysis": MTKLTETimerGroupCancelAnalysisPeripheral}
+                       "93xx-group-cancel-analysis": MTKLTETimerGroupCancelAnalysisPeripheral,
+                       "93xx-event-cancel-analysis": MTKLTETimerEventCancelAnalysisPeripheral}
         if lte_abi != "disabled" and lte_abi not in lte_classes:
             raise ValueError("Unsupported LTE timer ABI")
         if lte_abi != "disabled":

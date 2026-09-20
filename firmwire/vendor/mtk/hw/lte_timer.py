@@ -167,18 +167,60 @@ class MTKLTETimerGroupCancelAnalysisPeripheral(MTKLTETimerInitStorageAnalysisPer
 
     def hw_write(self, offset, size, value):
         if type(offset) is int and offset in self.GROUP_CANCEL_OFFSETS:
-            if type(size) is not int or size != 4 or type(value) is not int or not 0 <= value < 2**32:
-                raise ValueError("group cancel requires an aligned unsigned 32-bit write")
             bank = self.GROUP_CANCEL_OFFSETS.index(offset)
-            removed = self.group_events.cancel(bank, value)
-            self.cancel_trace.append(dict(offset=offset, mask=value, cancelled_mask=removed))
-            del self.cancel_trace[:-32]
-            if self.group_events.cancel_writes <= 32:
-                self.log.warning("LTE group cancel metadata=%s",
-                                 json.dumps(self.control_observation(), sort_keys=True))
-            return True
+            return self._cancel_write(self.group_events, self.cancel_trace,
+                                      "LTE group cancel metadata=%s", bank, offset, size, value)
         return super().hw_write(offset, size, value)
+
+    def _cancel_write(self, queue, trace, label, bank, offset, size, value):
+        if type(size) is not int or size != 4 or type(value) is not int or not 0 <= value < 2**32:
+            raise ValueError("cancel command requires an aligned unsigned 32-bit write")
+        removed = queue.cancel(bank, value)
+        trace.append(dict(offset=offset, mask=value, cancelled_mask=removed))
+        del trace[:-32]
+        if queue.cancel_writes <= 32:
+            self.log.warning(label, json.dumps(self.control_observation(), sort_keys=True))
+        return True
 
     def control_observation(self):
         return dict(super().control_observation(), group_events=self.group_events.facts(),
                     cancel_trace=[dict(event) for event in self.cancel_trace])
+
+
+class MTKLTETimerEventCancelAnalysisPeripheral(MTKLTETimerGroupCancelAnalysisPeripheral):
+    """Provisional per-event cancellation, distinct from group cancellation.
+
+    Reviewed target disable bodies strobe +0x408/+0x40c before separately
+    canceling group 4. No group-to-event identity mapping is inferred here.
+    Guest scheduling and timer back-door programming/readback remain strict;
+    the empty initial queue and cancel-on-write interpretation are assumptions.
+    """
+    EVENT_CANCEL_OFFSETS = (0x408, 0x40c)
+    KIND = "93xx-lte-event-cancel-analysis/v1"
+
+    @classmethod
+    def analysis_facts(cls):
+        facts = super().analysis_facts()
+        facts.update(event_cancel_supported=True, group_to_event_mapping_verified=False,
+                     timer_readback_supported=False,
+                     event_cancellation_model="independent-selected-queued-events-on-write/v1")
+        facts["unresolved_command_facts"] += ["group-to-event identity mapping",
+                                              "timer programming/readback effects"]
+        return facts
+
+    def __init__(self, name, address, size, **kwargs):
+        super().__init__(name, address, size, **kwargs)
+        # Bits are command identities, not fabricated timer addresses or IRQs.
+        self.individual_events = MaskedEventQueue(len(self.EVENT_CANCEL_OFFSETS), width=32)
+        self.event_cancel_trace = []
+
+    def hw_write(self, offset, size, value):
+        if type(offset) is int and offset in self.EVENT_CANCEL_OFFSETS:
+            bank = self.EVENT_CANCEL_OFFSETS.index(offset)
+            return self._cancel_write(self.individual_events, self.event_cancel_trace,
+                                      "LTE event cancel metadata=%s", bank, offset, size, value)
+        return super().hw_write(offset, size, value)
+
+    def control_observation(self):
+        return dict(super().control_observation(), individual_events=self.individual_events.facts(),
+                    event_cancel_trace=[dict(event) for event in self.event_cancel_trace])

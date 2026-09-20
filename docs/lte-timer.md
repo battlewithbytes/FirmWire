@@ -142,3 +142,38 @@ acknowledgment and clock/IRQ mappings remain unknown. Metadata retains
 The first 32 cancellation writes and the failure snapshot log bounded queue
 state. A live write-only startup can establish passage through this model,
 not correct timer behavior on silicon or a fully booted modem.
+
+## Provisional individual-event cancellation
+
+`93xx-event-cancel-analysis` adds +0x408/+0x40c cancellation to the preceding
+analysis profile. It is separate, default-off and native-only. Both words
+select bits in an independent two-bank event queue, using the same reusable
+`MaskedEventQueue` as group cancellation. A group command does not implicitly
+alter individual state and vice versa: the group-to-event identity mapping
+is not yet established. No timer pointer table or direct-timer event mask is
+hardcoded in the device. Every command accepts arbitrary unsigned word masks.
+
+New evidence: the relocation-free 62-byte body at reference function offsets
+0x26..0x64 of `EL1D_TC_HW_Disable_Direct_Timer_IRQ` matches uniquely and exactly
+in both Lagos and Coful. It selects +0x408 or +0x40c, writes a table-supplied mask
+then zero, and separately writes another mask then zero to group 4's +0x1bd0.
+The first 120 bytes of the group-trigger routine also match under the existing
+single-call relocation mask: it prepares selected timer back-door words before
+strobes of +0x408/+0x40c. Neither whole function matches. This does not establish
+complete timer hardware semantics or automatic support for arbitrary images.
+
+The provisional interpretation is per-event cancellation, not passive storage,
+timer programming or interrupt acknowledgment. The queue starts empty as an
+explicit assumption. Reserved command bits, edge/level behavior, the relationship
+between group commands and individual timers, and programming/readback effects
+remain unresolved. Accordingly `command_semantics_verified`,
+`group_to_event_mapping_verified`, `timer_readback_supported`, `boot_verified`,
+`clock_supported` and `guest_irq_routed` remain false. Back-door reads/writes,
+guest scheduling, clock start and status still fail. Old profiles are unchanged.
+
+Tests prequeue independent groups and individual events, vary masks/bases,
+exercise zero writes, preserve unrelated events and device instances, reject
+unsupported programming/status/clock accesses, bound logs and verify native-only
+selection. A native guest performs both types of cancellation on two relocated
+devices; due-event checks prove each affects only its selected domain. Live
+startup with empty queues cannot validate cancellation of real pending events.

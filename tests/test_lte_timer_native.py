@@ -9,13 +9,14 @@ import time
 import unittest
 
 
-def child(directory, control=False, analysis=False, cancel=False):
+def child(directory, control=False, analysis=False, cancel=False, events=False):
     from pandare import Panda
     from keystone import Ks, KS_ARCH_MIPS, KS_MODE_MIPS32, KS_MODE_LITTLE_ENDIAN
     from firmwire.vendor.mtk.machine import MT6878Machine
     from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral
     from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerInitStorageAnalysisPeripheral
     from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerGroupCancelAnalysisPeripheral
+    from firmwire.vendor.mtk.hw.lte_timer import MTKLTETimerEventCancelAnalysisPeripheral
     root = Path(directory)
     program = """
         li $t0, 0x400000
@@ -74,6 +75,17 @@ def child(directory, control=False, analysis=False, cancel=False):
         sw $t1, 0x1bac($t0)
         sw $zero, 0x1bac($t0)
         """
+    if events:
+        program += """
+        li $t0, 0x400000
+        li $t1, 6
+        sw $t1, 0x408($t0)
+        sw $zero, 0x408($t0)
+        li $t0, 0x600000
+        li $t1, 9
+        sw $t1, 0x40c($t0)
+        sw $zero, 0x40c($t0)
+        """
     program += """
         li $t1, 1
         sw $t1, 0x1100($zero)
@@ -92,6 +104,8 @@ def child(directory, control=False, analysis=False, cancel=False):
         device_class = MTKLTETimerInitStorageAnalysisPeripheral
     if cancel:
         device_class = MTKLTETimerGroupCancelAnalysisPeripheral
+    if events:
+        device_class = MTKLTETimerEventCancelAnalysisPeripheral
     devices = {base: device_class("timer", base, 0x2000,
                firmwire_machine=object.__new__(MT6878Machine)) for base in (0x400000, 0x600000)}
     if cancel:
@@ -99,6 +113,10 @@ def child(directory, control=False, analysis=False, cancel=False):
         for device in devices.values():
             device.group_events.schedule(0, 0xf, 20)
             device.group_events.schedule(1, 0xf, 20)
+    if events:
+        for device in devices.values():
+            device.individual_events.schedule(0, 0xf, 20)
+            device.individual_events.schedule(1, 0xf, 20)
 
     @panda.cb_unassigned_io_write
     def write(cpu, pc, address, size, value):
@@ -125,6 +143,8 @@ def child(directory, control=False, analysis=False, cancel=False):
                                  for x in range(0x1000, 0x1024 if analysis else 0x1018 if control else 0x100c, 4)])
             if cancel:
                 report["due"] = [d.group_events.take_due(20) for d in devices.values()]
+            if events:
+                report["individual_due"] = [d.individual_events.take_due(20) for d in devices.values()]
             (root / "result.tmp").write_text(json.dumps(report))
             (root / "result.tmp").replace(root / "result.json")
 
@@ -151,11 +171,15 @@ class LTETimerNativeTests(unittest.TestCase):
     def test_guest_cancellation_removes_only_selected_events(self):
         self.run_case(True, True, True)
 
-    def run_case(self, control, analysis=False, cancel=False):
+    @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_LTE_TIMER") == "1", "requires development PANDA")
+    def test_guest_individual_cancellation_keeps_domains_separate(self):
+        self.run_case(True, True, True, True)
+
+    def run_case(self, control, analysis=False, cancel=False, events=False):
         with tempfile.TemporaryDirectory(prefix="lte-timer-native-") as directory, tempfile.TemporaryFile(mode="w+") as log:
             result = Path(directory) / "result.json"
             proc = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()),
-                                     "--cancel-child" if cancel else "--analysis-child" if analysis else "--control-child" if control else "--child", directory],
+                                     "--events-child" if events else "--cancel-child" if cancel else "--analysis-child" if analysis else "--control-child" if control else "--child", directory],
                                     stdout=log, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 10
@@ -183,6 +207,12 @@ class LTETimerNativeTests(unittest.TestCase):
                 self.assertEqual([[(e["bank"], e["bit"]) for e in due] for due in report["due"]],
                                  [list(rows) for rows in expected])
                 self.assertEqual([f["group_events"]["cancel_writes"] for f in report["facts"]], [2, 2])
+            if events:
+                expected = (((0, 0), (0, 3), (1, 0), (1, 1), (1, 2), (1, 3)),
+                            ((0, 0), (0, 1), (0, 2), (0, 3), (1, 1), (1, 2)))
+                self.assertEqual([[(e["bank"], e["bit"]) for e in due] for due in report["individual_due"]],
+                                 [list(rows) for rows in expected])
+                self.assertEqual([f["individual_events"]["cancel_writes"] for f in report["facts"]], [2, 2])
             for facts in report["facts"]:
                 self.assertFalse(facts["clock_supported"])
                 self.assertFalse(facts["guest_irq_routed"])
@@ -194,8 +224,8 @@ class LTETimerNativeTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] in ("--child", "--control-child", "--analysis-child", "--cancel-child"):
-        child(sys.argv[2], sys.argv[1] != "--child", sys.argv[1] in ("--analysis-child", "--cancel-child"),
-              sys.argv[1] == "--cancel-child")
+    if len(sys.argv) == 3 and sys.argv[1] in ("--child", "--control-child", "--analysis-child", "--cancel-child", "--events-child"):
+        child(sys.argv[2], sys.argv[1] != "--child", sys.argv[1] in ("--analysis-child", "--cancel-child", "--events-child"),
+              sys.argv[1] in ("--cancel-child", "--events-child"), sys.argv[1] == "--events-child")
     else:
         unittest.main()
