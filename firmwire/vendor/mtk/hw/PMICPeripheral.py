@@ -3,7 +3,8 @@
 import logging
 
 from . import PassthroughPeripheral
-from .pmic import PmicTarget, PmicWacsControl
+from .pmic import PmicTarget
+from .pmic_wacs import PmicWacsControl
 
 # see the Linux kernel driver (mtk-pmic-wrap)
 # modern WACS (wrapper access?) regs in order:

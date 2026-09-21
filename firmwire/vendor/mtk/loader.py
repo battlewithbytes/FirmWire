@@ -129,6 +129,10 @@ class MTKLoader(firmwire.loader.Loader):
             "type": PurePath, "default": None,
             "help": "ROM-bound explicit SOFTWARE RF identity/ECO assumptions; requires mt6768-software-rf",
         },
+        "pmic_analysis_profile": {
+            "type": PurePath, "default": None,
+            "help": "OPT-IN ROM-bound shared PMIC storage analysis; native pending/software-RF BSI only",
+        },
         "mml2_mmu": {
             "type": str, "choices": ["disabled", "93xx-control"], "default": "disabled",
             "help": "OPT-IN reviewed 93xx MML2 MCU MMU control ABI; native analysis only, no translation/DMA",
@@ -518,7 +522,11 @@ class MTKLoader(firmwire.loader.Loader):
         ########################
 
         for peripheral in self.modem_soc.peripherals:
-            if ((ipc_mode != "disabled" or ports_profile is not None) and issubclass(peripheral._cls, PCCIF_Periph)
+            if peripheral is getattr(self, "pmic_analysis_wrapper", None):
+                attributes = dict(peripheral._attr)
+                attributes["pmic_target"] = self.pmic_analysis_binding.target
+                self.create_peripheral(peripheral, peripheral._address, peripheral._size, **attributes)
+            elif ((ipc_mode != "disabled" or ports_profile is not None) and issubclass(peripheral._cls, PCCIF_Periph)
                     and peripheral._attr.get("pccifid") == 0):
                 attributes = dict(peripheral._attr)
                 if ipc_mode != "disabled":
@@ -539,6 +547,14 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        self.pmic_analysis_binding = self.pmic_analysis_wrapper = None
+        pmic_path = self.loader_args.get("pmic_analysis_profile")
+        if pmic_path is not None:
+            from .pmic_profile import load_pmic_analysis, select_wrapper
+            self.pmic_analysis_binding = load_pmic_analysis(pmic_path,
+                self.capability_report["rom_sha256"], boot_mode=self.boot_mode,
+                bsi_mode=self.loader_args.get("bsi", "disabled"))
+            self.pmic_analysis_wrapper = select_wrapper(self.pmic_analysis_binding, self.modem_soc.peripherals)
         scheduler_abi = self.loader_args.get("bsi_scheduler", "disabled")
         if scheduler_abi not in ("disabled", "mt6768-enable-capture-analysis"):
             raise ValueError("Unsupported BSI scheduler ABI")
@@ -641,6 +657,15 @@ class MTKLoader(firmwire.loader.Loader):
             self.capability_report["software_rf_analysis"] = rf_profile
             self.write_capability_report()
         mmu_abi = self.loader_args.get("mml2_mmu", "disabled")
+        pmic_kwargs = {}
+        if self.pmic_analysis_binding is not None:
+            binding = self.pmic_analysis_binding
+            if rf_profile is not None and str(binding.bsi_port) in (
+                    set(rf_profile["ports"]) | set(rf_profile.get("idle_mipi_ports", {}))):
+                raise ValueError("PMIC serial port conflicts with another configured target")
+            pmic_kwargs = {"pmic_target": binding.target, "pmic_port": binding.bsi_port}
+            self.capability_report["pmic_analysis"] = binding.facts()
+            self.write_capability_report()
         if mmu_abi not in ("disabled", "93xx-control"):
             raise ValueError("Unsupported MML2 MMU ABI")
         if mmu_abi != "disabled" and self.boot_mode != "native":
@@ -880,7 +905,7 @@ class MTKLoader(firmwire.loader.Loader):
         )
         self.add_memory_range(
             0xA6160000, 0x9000, name="MODEML1_AO_BSI_MM_2", permissions="rw-",
-            **({"emulate": BSIImmediatePeripheral, "bsi_mode": bsi_mode.split("-", 1)[1], "rf_profile": rf_profile}
+            **({"emulate": BSIImmediatePeripheral, "bsi_mode": bsi_mode.split("-", 1)[1], "rf_profile": rf_profile, **pmic_kwargs}
                if bsi_mode != "disabled" else {})
         )
         self.add_memory_range(

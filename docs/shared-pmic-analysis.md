@@ -2,14 +2,65 @@
 
 The PMIC is one device even when firmware accesses it through different buses.
 `PmicTarget` (`hw/pmic.py`) is the transport-independent read/write/reset/facts
-contract. `PmicWacsControl` implements the reviewed WACS command/status/clear
+contract. `PmicWacsControl` (`hw/pmic_wacs.py`) implements the reviewed WACS command/status/clear
 interface; `PmicBsiWriteTarget` (`hw/pmic_serial.py`) implements the observed
 16-address/16-data BSI write path. Both receive **the same target instance**.
 
-This is programmatic constructor opt-in only. No ROM/chipset auto-selection,
-new boot-recipe switch, hardware identity, or live-image register defaults are
-provided. Existing boot profiles still use the legacy wrapper. The new classes
+Opt in through constructors or `--mtk-loader-pmic_analysis_profile /path/profile.json`.
+No ROM/chipset auto-selection, hardware identity, or live-image register defaults
+are provided. Existing boot profiles still use the legacy wrapper. The new classes
 are not evidence that a modem has booted, nor a verified MT6357/MT6358 model.
+
+## JSON profiles and device ownership
+
+Device behavior belongs in FirmWire, with separate modules for target state
+(`hw/pmic.py`), WACS (`hw/pmic_wacs.py`), BSI (`hw/pmic_serial.py`), and profile
+validation/composition (`pmic_profile.py`). Cockpit forwards configuration and
+records evidence; it does not implement PMIC behavior.
+
+The current profile schema is deliberately only **16-bit plain-register analysis**.
+JSON can change addresses, masks, readability and explicit initial values without
+changing Python. Different register widths, unlock protocols, SET/CLR aliases,
+interrupts and analog side effects require a reviewed behavior implementation and
+an appropriate schema extension; they must not silently become plain storage.
+SoC profiles still own controller MMIO mappings. The selected wrapper name and BSI
+port attach one shared device; PMIC register addresses are not controller addresses.
+
+Synthetic example (replace the hash and wrapper with an explicit supported setup;
+these addresses and values are NOT a Lagos profile):
+
+```json
+{
+  "schema": "firmwire.pmic-analysis/v1",
+  "kind": "plain-register-map-analysis/v1",
+  "rom_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "name": "synthetic-pmic-storage",
+  "source": "analysis-assumption",
+  "reason": "Cross-transport experiment only; no hardware reset claim",
+  "wrapper_name": "TEST_WRAPPER",
+  "bsi_port": 9,
+  "registers": {
+    "36": {"reset_value": 4951, "write_mask": 65535, "readable": true,
+           "reason": "Synthetic initial value"},
+    "96": {"reset_value": null, "write_mask": 65535, "readable": true,
+           "reason": "Unknown until a full-width write"}
+  }
+}
+```
+
+All shown fields are required. Addresses are canonical decimal strings, not hex
+or zero-padded aliases. Unknown properties, duplicate JSON keys, mismatched ROM
+hashes, oversized documents (>64 KiB), and more than 256 registers are rejected.
+Use `null` for unknown state; an explicit zero is an analysis assumption, not a
+measured reset value. Each entry needs its own reason. The ROM hash is a safety
+binding, **not evidence selecting a PMIC hardware family**.
+
+Real-loader composition requires native mode and `mt6768-pending` or
+`mt6768-software-rf` BSI. Exactly one existing PMIC wrapper must match, and the BSI
+port must not collide with RF/MIPI endpoints. The capability report includes the
+profile hash, shared-target flag, unresolved-unknown policy, and false boot/silicon
+claims. Unknown accesses stay pending with no legacy fallback inside this mode.
+Snapshot creation/restoration is refused early; use cold restarts.
 
 ## Minimal composition
 
@@ -110,12 +161,18 @@ directions, explicit configuration and snapshot refusal. The native test runs
 unchanged synthetic MIPS instructions at two bases/ports with different payloads,
 observing successful BSI-write/WACS-read coherence and unresolved unknowns.
 No vendor firmware, PMIC reset table or hardware identity is needed by these tests.
+Profile tests additionally cover relocated JSON register maps, malformed/duplicate
+configuration, ROM binding, missing/ambiguous wrapper selection, port conflicts,
+instance isolation, native-only gating, and target identity through the real
+loader memory map and machine realization path (Avatar range registration mocked).
 
 ## Still required for Lagos
 
 Identify/select the PMIC variant; review ordinary versus protected/aliased DCXO
 fields; supply explicit evidence or labelled assumptions for necessary reset
-values; compose one target into the real machine's WACS and BSI construction.
+values. Real-machine WACS/BSI composition is now wired and tested, but no Lagos
+profile is selected. Earlier boot performs a broad PMIC scan: strict handling may
+stop there before DCXO. Do not seed thousands of legacy zero results as reset facts.
 Then rerun unchanged firmware and verify DCXO pre-init/init return. Simply
 allowing every PMIC write or copying the old wrapper's zeros into a register
 map is not that validation. No new mtkloader parser requirement is established.

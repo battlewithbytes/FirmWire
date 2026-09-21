@@ -50,6 +50,10 @@ class MT6878Machine(FirmWireEmu):
             log.error("Unresolved startup capabilities; refusing machine initialization")
             return False
         native = loader.boot_mode == "native"
+        if (loader.loader_args.get("pmic_analysis_profile") is not None
+                and (getattr(args, "restore_snapshot", None) or getattr(args, "snapshot_at", None))):
+            log.error("Shared PMIC analysis supports cold restart only, not snapshots")
+            return False
         if (loader.loader_args.get("bsi") == "mt6768-software-rf"
                 and (getattr(args, "restore_snapshot", None) or getattr(args, "snapshot_at", None))):
             log.error("Software RF guest clock supports cold restart only, not snapshots")
@@ -966,6 +970,8 @@ class MT6878Machine(FirmWireEmu):
         return super().set_breakpoint(address, handler, temporary=temporary, **kwargs)
 
     def restore_snapshot(self, snapshot_name):
+        if self.loader.loader_args.get("pmic_analysis_profile") is not None:
+            raise RuntimeError("Shared PMIC snapshot restore requires identity-preserving serialization")
         # MTK snapshot restoring is MESSED UP!
         # This is some whacky stuff to make restores work. I
         # I suspect that our MTK machine introduced a bug into panda and some global state isn't being captured

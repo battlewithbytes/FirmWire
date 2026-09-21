@@ -10,6 +10,7 @@ package = types.ModuleType("pmic_component_unit")
 package.__path__ = [str(Path(__file__).resolve().parents[1] / "firmwire/vendor/mtk/hw")]
 sys.modules[package.__name__] = package
 p = importlib.import_module(package.__name__ + ".pmic")
+wacs = importlib.import_module(package.__name__ + ".pmic_wacs")
 s = importlib.import_module(package.__name__ + ".pmic_serial")
 bsi = importlib.import_module(package.__name__ + ".bsi")
 rf = importlib.import_module(package.__name__ + ".rf_serial")
@@ -66,7 +67,7 @@ class PmicTests(unittest.TestCase):
     def test_bsi_write_wacs_read_and_wacs_write_share_one_device(self):
         t = target()
         serial = s.PmicBsiWriteTarget(t)
-        channels = [p.PmicWacsControl(t) for _ in range(2)]
+        channels = [wacs.PmicWacsControl(t) for _ in range(2)]
         for address, value in ((0x24, 0x1357), (0xfffe, 0xbeef)):
             self.assertEqual(serial.exchange(command(address, value)).status, "write-complete")
             for w in channels:
@@ -83,7 +84,7 @@ class PmicTests(unittest.TestCase):
 
     def test_unknown_read_stays_pending_until_explicit_backend_retry(self):
         t = target()
-        w = p.PmicWacsControl(t)
+        w = wacs.PmicWacsControl(t)
         w.write(0, (0x60 >> 1) << 16)
         before = w.facts(), t.facts()
         for _ in range(200): self.assertEqual(w.read(4), 1 << 21 | 2 << 16)
@@ -99,7 +100,7 @@ class PmicTests(unittest.TestCase):
 
     def test_transport_reset_does_not_reset_shared_target_or_other_channel(self):
         t = target()
-        a, b = p.PmicWacsControl(t), p.PmicWacsControl(t)
+        a, b = wacs.PmicWacsControl(t), wacs.PmicWacsControl(t)
         serial = s.PmicBsiWriteTarget(t)
         serial.exchange(command(value=0x6789))
         a.write(0, 0x12 << 16)
@@ -144,7 +145,7 @@ class PmicTests(unittest.TestCase):
         self.assertEqual(t.read(0x24).value, 0x1234)
 
     def test_wacs_access_checks_and_valid_clear_keep_latched_data(self):
-        w = p.PmicWacsControl(target(), init_done_offset=22)
+        w = wacs.PmicWacsControl(target(), init_done_offset=22)
         for offset in (0, 8, 12, True, 4.0):
             with self.assertRaises(ValueError): w.read(offset)
         for offset, value in ((12, 0), (True, 0), (0, True), (0, -1), (0, 1 << 32), (8, 1)):
@@ -156,7 +157,7 @@ class PmicTests(unittest.TestCase):
         self.assertEqual(w.facts(), before)
         self.assertEqual(w.read(4), 1 << 22 | 6 << 16 | 0xa5a5)
         for bit in (16, 17, 18, 19, 20, 32, True):
-            with self.assertRaises(ValueError): p.PmicWacsControl(target(), init_done_offset=bit)
+            with self.assertRaises(ValueError): wacs.PmicWacsControl(target(), init_done_offset=bit)
 
     def test_target_failure_never_turns_into_transport_completion(self):
         class Broken(p.PmicTarget):
@@ -164,7 +165,7 @@ class PmicTests(unittest.TestCase):
             def write(self, address, value): return p.PmicResult("write-complete", 0)
             def reset(self): pass
             def facts(self): return {}
-        w = p.PmicWacsControl(Broken())
+        w = wacs.PmicWacsControl(Broken())
         with self.assertRaises(ValueError): w.write(0, 0)
         self.assertEqual(w.state, 2)
         self.assertEqual(w.completed_reads, 0)
