@@ -942,7 +942,8 @@ class MTKLoader(firmwire.loader.Loader):
                 self.add_memory_range(0xA6190000, start - 0xA6190000,
                     name="ABBMIX_PREFIX", permissions="rw-")
             self.add_memory_range(start, profile["size"], name="ABBMIX_CAL",
-                emulate=AbbMixAnalysisPeripheral, calibration=calibration, permissions="rw-")
+                emulate=AbbMixAnalysisPeripheral, calibration=calibration,
+                modeled_range=profile["modeled_range"], permissions="rw-")
             if end < 0xA619E000:
                 self.add_memory_range(end, 0xA619E000 - end, name="ABBMIX_SUFFIX", permissions="rw-")
         self.add_memory_range(

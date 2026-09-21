@@ -20,7 +20,7 @@ def load_abbmix_profile(path, rom_sha256, *, boot_mode):
         raise ValueError("Calibration profile exceeds 64 KiB")
     p = json.loads(raw, object_pairs_hook=_unique)
     keys = {"schema", "rom_sha256", "source", "reason", "base", "size", "layout",
-            "registers", "prerequisites", "results"}
+            "registers", "prerequisites", "results", "modeled_range"}
     if (boot_mode != "native" or not isinstance(p, dict) or set(p) != keys
             or p["schema"] != "firmwire.abbmix-analysis/v1" or p["source"] != "analysis-assumption"
             or not isinstance(rom_sha256, str) or len(rom_sha256) != 64
@@ -28,6 +28,9 @@ def load_abbmix_profile(path, rom_sha256, *, boot_mode):
             or p["rom_sha256"] != rom_sha256
             or not uint(p["base"], 32) or p["base"] % 2
             or type(p["size"]) is not int or not 2 <= p["size"] <= 65536 or p["size"] % 2
+            or not isinstance(p["modeled_range"], list) or len(p["modeled_range"]) != 2
+            or any(type(v) is not int or v % 2 for v in p["modeled_range"])
+            or not 0 <= p["modeled_range"][0] < p["modeled_range"][1] <= p["size"]
             or not isinstance(p["layout"], dict) or set(p["layout"]) != set(CalibrationLayout.__dataclass_fields__)
             or not isinstance(p["layout"]["status"], list)
             or not isinstance(p["registers"], dict)
@@ -43,6 +46,7 @@ def load_abbmix_profile(path, rom_sha256, *, boot_mode):
     layout = CalibrationLayout(**{**p["layout"], "status": tuple(p["layout"]["status"])})
     model = SelectedCalibrationAnalysis(layout, registers, frozenset(p["prerequisites"]),
                                         p["results"], reason=p["reason"])
-    if max(set(registers) | set(layout.status)) + 2 > p["size"]:
+    if any(not p["modeled_range"][0] <= a < a + 2 <= p["modeled_range"][1]
+           for a in set(registers) | set(layout.status)):
         raise ValueError("Calibration layout exceeds declared window")
     return p, model, hashlib.sha256(raw).hexdigest()

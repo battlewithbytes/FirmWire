@@ -41,7 +41,7 @@ are unsupported; peripheral serialization is refused. Use cold boots only.
 `--mtk-loader-abbmix_analysis_profile <path>` requires native boot and an exact
 ROM digest match. The schema is `firmwire.abbmix-analysis/v1`, with exact keys:
 `rom_sha256`, `source` (`analysis-assumption`), `reason`, `base`, `size`, `layout`,
-`registers`, `prerequisites`, `results`, and `schema`.
+`registers`, `prerequisites`, `results`, `modeled_range`, and `schema`.
 `registers` has canonical decimal offset keys and explicit 16-bit values or null.
 `results` is null (unresolved backend) or one full width-bounded array per status
 register. Duplicate JSON keys, malformed arrays and overlapping layouts fail.
@@ -51,7 +51,20 @@ existing `0xa6190000..0xa619dfff` ABB window, preserving prefix/suffix RAM witho
 overlap. That enclosing window is a reviewed machine mapping, not an assumption
 that every modem has the same address. New family maps need separate review;
 the device and schema themselves do not contain that address or a ROM identity.
-Outside the selected window, pre-existing plain-memory behavior is unchanged.
+`modeled_range` is an explicit half-open pair of offsets within the page. Only
+that range dispatches to the strict device. Other addresses in the page retain
+the existing zero-initialized RAM semantics through FirmWire's reusable
+`PassthroughPeripheral`; this is labelled legacy backing, not invented register
+behavior. Crossing the boundary is rejected, not partly executed. Observation
+reports the modeled range and separate backing access counts. Outside the page,
+pre-existing plain-memory behavior is unchanged.
+
+The first live trial caught an overly broad whole-page interception: a read at
+`0xa619da0c` predates the reviewed calibration routine. It failed strictly before
+any operation completed. The corrected profile models only offsets `0x800..0x85f`
+inside the `0xa619d000` page. It does not add a fabricated calibration response
+for the unrelated register. The original fixture requires the earlier `f46fee7`
+profile parser; the revised profile explicitly includes `modeled_range`.
 
 Cockpit carries the example Lagos fixture: two banks of sixteen explicitly
 synthetic, distinct 12-bit values; trigger bit 0 and ready bit 13; selector in
@@ -68,7 +81,9 @@ refusal. `tests/test_abbmix_native.py` runs actual MIPS halfword loads/stores at
 two unrelated bases, copying both banks to guest RAM. Enable it with
 `FIRMWIRE_TEST_NATIVE_ABBMIX=1` in the existing `firmwire-cockpit:irq` container.
 
-The selected full regression suite passes **323 tests / three skipped**, with
+The selected full regression suite passes **324 tests / three skipped**, with
 native gates enabled and the external-download test excluded. The unchanged
 firmware experiment is recorded separately in Cockpit; unit/native synthetic
-success is not proof of vendor firmware boot.
+success is not proof of vendor firmware boot. A ninth focused test additionally
+covers preserved neighboring RAM at several widths, strict in-range unknowns,
+out-of-bounds accesses and crossings between RAM and device state.
