@@ -58,6 +58,7 @@ class BsiImmediateControl:
     def reset(self):
         self.storage = bytearray(self.size)
         self.pending = {}
+        self.pending_blockers = {}
         self.sequence = self.completed = self.busy_rejections = 0
         self.completed_reads = self.read_status = 0
         self.events = []
@@ -135,26 +136,33 @@ class BsiImmediateControl:
 
     def _dispatch(self, command):
         if self.serial_bus is None:
+            self._unresolved(command, "no-backend-connected")
             return
         # Never consume another target read when the controller cannot publish
         # it. Polling does not retry dispatch or mutate either endpoint.
         if command.extended or (command.read and (self.read_layout is None or
                 self.read_status & (1 << self.read_layout.bank_ready_bits[command.bank]))):
-            self._record("backend_unresolved", bank=command.bank, sequence=command.sequence,
-                         reason="unsupported-transfer-or-unacknowledged-read")
+            self._unresolved(command, "unsupported-transfer-or-unacknowledged-read")
             return
         result = self.serial_bus.exchange(command)
         if result.status == "unresolved":
             if result.value is not None:
                 raise ValueError("Unresolved target result must not supply data")
-            self._record("backend_unresolved", bank=command.bank, sequence=command.sequence,
-                         reason=result.reason)
+            self._unresolved(command, result.reason)
         elif result.status == "write-complete" and not command.read and result.value is None:
             self.complete_write(command.bank, command.sequence)
         elif result.status == "read-complete" and command.read:
             self.complete_read(command.bank, command.sequence, result.value)
         else:
             raise ValueError("Serial backend returned an incompatible completion")
+
+    def _unresolved(self, command, reason):
+        # Diagnostic state is bounded by the pending bank count, not the event
+        # ring. Retain the original decision even if rejected retries rotate
+        # that ring. Nothing here retries, completes or changes a transaction.
+        fields = dict(bank=command.bank, sequence=command.sequence, reason=reason)
+        self.pending_blockers[command.bank] = fields
+        self._record("backend_unresolved", **fields)
 
     def complete_write(self, bank, sequence):
         """Explicit future backend boundary; NEVER called by guest polling.
@@ -170,6 +178,7 @@ class BsiImmediateControl:
         if command.read or command.extended:
             raise NotImplementedError("RF read/extended completion is unsupported")
         del self.pending[bank]
+        self.pending_blockers.pop(bank, None)
         self.completed += 1
         # The explicit backend completion returns this channel to idle.
         self.storage[self.banks[bank]] &= ~1
@@ -200,6 +209,7 @@ class BsiImmediateControl:
         self.storage[base+16:base+20] = (value >> 32).to_bytes(4, "little")
         self.read_status |= bit
         del self.pending[bank]
+        self.pending_blockers.pop(bank, None)
         self.storage[base] &= ~1
         self.completed_reads += 1
         self._record("backend_read_complete", bank=bank, sequence=sequence, value=value)
@@ -216,4 +226,5 @@ class BsiImmediateControl:
             "read_completion_layout": asdict(self.read_layout) if self.read_layout else None,
             "busy_rejections": self.busy_rejections,
             "pending": [asdict(c) for c in self.pending.values()],
+            "pending_blockers": [dict(item) for item in self.pending_blockers.values()],
             "events": list(self.events), "unmodelled_registers": "RAM-compatible storage"}

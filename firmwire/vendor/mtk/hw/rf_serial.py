@@ -59,6 +59,25 @@ def validate_software_rf_profile(config, rom_sha256):
             validate_rx_tpd_config(identity["rx_tpd_calibration"])
             if set(identity.get("reset_registers", {})) & {"423", "429"}:
                 raise ValueError("RX TPD results cannot also be reset seeds")
+    idle_ports = config.get("idle_mipi_ports", {})
+    if (not isinstance(idle_ports, dict) or len(ports) + len(idle_ports) > 16
+            or set(ports) & set(idle_ports)):
+        raise ValueError("Idle MIPI ports must be explicit and disjoint from RF targets")
+    for port, idle in idle_ports.items():
+        if not isinstance(port, str) or not re.fullmatch(r"[0-9]|1[0-5]", port):
+            raise ValueError("Invalid idle MIPI port")
+        validate_idle_mipi_config(idle)
+    return copy.deepcopy(config)
+
+
+def validate_idle_mipi_config(config):
+    if (not isinstance(config, dict)
+            or set(config) != {"kind", "source", "reason", "idle_level"}
+            or config["kind"] != "standard-mipi-idle-line-analysis/v1"
+            or config["source"] != "analysis-assumption"
+            or not isinstance(config["reason"], str) or not config["reason"].strip()
+            or type(config["idle_level"]) is not int or config["idle_level"] not in (0, 1)):
+        raise ValueError("Idle MIPI needs an explicit line-level analysis assumption")
     return copy.deepcopy(config)
 
 
@@ -414,6 +433,60 @@ class WriteCaptureTarget(SerialTarget):
                 "silicon_verified": False, "read_values_supplied": 0,
                 "timing": "synchronous-analysis-substitution",
                 "writes": self.writes, "last": list(self.last)}
+
+
+class IdleLineMipiTarget(SerialTarget):
+    """Opt-in undriven-line experiment, NOT an identity/register replacement.
+
+    Only the reviewed standard 13-bit header / 9-bit data framing is accepted.
+    Reads sample an explicit constant electrical level, including the parity
+    position; we never synthesize a valid slave's parity or an identity. Writes
+    are shifted into an unpopulated bus and have no target-side effects. This
+    synchronous transport assumption is not verified silicon/timing behavior.
+    """
+    def __init__(self, config):
+        self.config = validate_idle_mipi_config(config)
+        self.reset()
+
+    def reset(self):
+        self.reads = self.writes = 0
+        self.recent = []
+
+    def exchange(self, command):
+        if (command.extended or len(command.data) != 2 or len(command.lengths) != 2
+                or any(type(x) is not int or not 0 <= x <= 0xffffffff
+                       for x in (*command.data, *command.lengths))
+                or command.lengths[1] != 0):
+            return SerialResult("unresolved", reason="idle-mipi-unsupported-framing")
+        word = command.data[0]
+        if command.read:
+            header = word
+            valid = (command.lengths[0] == 0x8000c and word < 1 << 13
+                     and (header >> 6) & 7 == 3)
+        else:
+            header, payload = word >> 9, word & 0x1ff
+            valid = (command.lengths[0] == 21 and word < 1 << 22
+                     and (header >> 6) & 7 == 2 and payload.bit_count() % 2 == 1)
+        if not valid or header.bit_count() % 2 != 1:
+            return SerialResult("unresolved", reason="idle-mipi-unsupported-framing")
+        if command.read:
+            self.reads += 1
+            value = 0x1ff if self.config["idle_level"] else 0
+            result = SerialResult("read-complete", value, "explicit-idle-line-analysis")
+        else:
+            self.writes += 1
+            result = SerialResult("write-complete", reason="explicit-unpopulated-bus-analysis")
+        self.recent.append(dict(sequence=command.sequence, port=command.port,
+                                read=command.read, word=word))
+        del self.recent[:-16]
+        return result
+
+    def facts(self):
+        return dict(kind="standard-mipi-idle-line-analysis/v1", analysis_only=True,
+                    config=copy.deepcopy(self.config), reads=self.reads, writes=self.writes,
+                    recent=copy.deepcopy(self.recent), rf_emulated=False, silicon_verified=False,
+                    target_identity_supplied=False, target_registers_modelled=False,
+                    parity_generated=False, timing="synchronous-analysis-substitution")
 
 
 class SoftwareMt6177Target(SerialTarget):

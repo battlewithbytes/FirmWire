@@ -248,6 +248,38 @@ class RFSerialTests(unittest.TestCase):
         self.assertEqual(len(model.pending), 2)
         self.assertEqual(model.completed, 0)
 
+    def test_pending_reason_survives_retry_history_and_is_detached(self):
+        model = self.model()
+        self.issue(model, 0xfb, port=3, read=True)
+        command = model.pending[0]
+        expected = dict(bank=0, sequence=command.sequence, reason="no-target-on-port")
+        for _ in range(100):
+            self.issue(model, 0xffff, port=4)
+            self.assertEqual(model.read(0x108, 4), 0)
+        self.assertFalse(any(e["kind"] == "backend_unresolved" for e in model.events))
+        self.assertEqual(model.pending[0], command)
+        self.assertEqual(model.facts()["pending_blockers"], [expected])
+        model.facts()["pending_blockers"][0]["reason"] = "changed"
+        self.assertEqual(model.facts()["pending_blockers"], [expected])
+        self.assertEqual(model.completed_reads, 0)
+        self.assertEqual(model.facts()["serial_targets"]["5"]["writes"], 0)
+        model.complete_read(0, command.sequence, 0x123)  # explicit test backend
+        self.assertEqual(model.facts()["pending_blockers"], [])
+        self.issue(model, 1, port=3)
+        model.reset()
+        self.assertEqual(model.facts()["pending_blockers"], [])
+
+    def test_pending_reasons_are_bank_local_for_other_layouts_and_ports(self):
+        model = bsi.BsiImmediateControl(size=0x2000, bank_offsets=(0x400, 0x800),
+                                       mode="pending", serial_bus=rf.SerialBus({}))
+        for bank, port in ((0, 9), (1, 12)):
+            self.issue(model, 17, port=port, bank=bank)
+        self.assertEqual([x["bank"] for x in model.facts()["pending_blockers"]], [0, 1])
+        model.complete_write(1, model.pending[1].sequence)
+        self.assertEqual([x["bank"] for x in model.facts()["pending_blockers"]], [0])
+        self.assertEqual(model.read(0x408, 4), 0)
+        self.assertEqual(model.read(0x808, 4), 1)
+
     def test_reset_clears_target_state_and_pending_commands(self):
         model = self.model()
         self.issue(model, 123)

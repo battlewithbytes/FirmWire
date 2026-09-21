@@ -251,6 +251,49 @@ calibration return. No RF read remains pending. A later data-bus exception at
 reported PC `0x901d2be6` still fails full boot; that mapping/access boundary is
 separate from the synthetic calibration contract.
 
+## Optional unpopulated MIPI line (not RF hardware emulation)
+
+An unanswered serial read must not be repaired by forcing the controller ready.
+The optional top-level `idle_mipi_ports` map instead connects an explicitly
+assumed unpopulated bus to the existing controller/backend completion boundary:
+
+```json
+"idle_mipi_ports": {
+  "3": {
+    "kind": "standard-mipi-idle-line-analysis/v1",
+    "source": "analysis-assumption",
+    "reason": "Experiment with an unpopulated idle-low MIPI bus; not measured electrical behavior.",
+    "idle_level": 0
+  }
+}
+```
+
+This fragment belongs beside `ports` in the existing ROM-bound software profile.
+It is absent by default. Canonical decimal port keys 0..15 must not overlap RF
+targets; no port is populated automatically. Each endpoint is independent.
+
+`IdleLineMipiTarget` accepts only standard read/write framing reviewed against
+the firmware's frame constructor: odd-parity thirteen-bit header; read command
+3 with nine sampled response bits (`length0=0x8000c`), or write command 2 with an
+odd-parity nine-bit payload (`length0=21`). The second length must be zero;
+extended, locked, malformed or other transfers remain unresolved.
+
+Reads sample nine copies of the configured line level (0 or 1), including the
+parity position. No slave parity, identity, calibration or register value is
+generated. Writes have no target-side effects and do not create readback storage.
+The controller completes supported transactions synchronously through its usual
+backend/ack path. This does not establish electrical timing, silicon behavior,
+successful RF operation, or full modem boot. High is a separate pull-level test,
+not a promise that a guest interprets it as "absent". A real device requires a
+different `SerialTarget` implementation and reviewed board population.
+
+The profile and endpoint facts expose the assumption, counts and bounded frame
+history; startup logs label `IDLE MIPI LINE ANALYSIS`. Unconfigured ports still
+remain pending. Controller facts also retain `pending_blockers`, bound to each
+bank/sequence until completion/reset, so rejected retries cannot erase the
+original reason by rotating the ordinary event history. These diagnostics never
+retry or complete a transaction.
+
 ## Tests
 
 `tests/test_mtk_rf_serial.py` tests framing, explicit identities, storage/readback,

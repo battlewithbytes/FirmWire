@@ -11,7 +11,7 @@ import time
 import unittest
 
 
-def child(directory, read_completion=False, capture=False, software=None, rcal=None, ldo=None, clock_trial=None, rx_rc=None, rx_tpd=None):
+def child(directory, read_completion=False, capture=False, software=None, rcal=None, ldo=None, clock_trial=None, rx_rc=None, rx_tpd=None, idle_line=None):
     from pandare import Panda
     from firmwire.vendor.mtk.machine import MT6878Machine
     from firmwire.vendor.mtk.hw.BSIPeripheral import BSIImmediatePeripheral
@@ -193,6 +193,19 @@ def child(directory, read_completion=False, capture=False, software=None, rcal=N
                 "sw $v0, 0x1010($zero)", "break"]
         code, _ = Ks(KS_ARCH_MIPS, KS_MODE_MIPS32 | KS_MODE_LITTLE_ENDIAN).asm("\n".join(asm))
         instructions = list(struct.unpack("<%dI" % (len(code)//4), bytes(code)))
+    if idle_line is not None:
+        asm = ["li $t0, 0x400000", "li $t1, 0xfb", "sw $t1, 0x1004($t0)",
+               "li $t1, 0x8000c", "sw $t1, 0x1014($t0)",
+               "li $t1, 0x703", "sw $t1, 0x1000($t0)",
+               "lw $v0, 0x100c($t0)", "sw $v0, 0x1000($zero)",
+               "lw $v0, 0x1008($t0)", "sw $v0, 0x1004($zero)",
+               "lw $v0, 0x1204($t0)", "sw $v0, 0x1008($zero)",
+               "li $t1, 1", "sw $t1, 0x1200($t0)",
+               "li $t1, 0x803", "sw $t1, 0x1000($t0)",
+               "lw $v0, 0x1008($t0)", "sw $v0, 0x100c($zero)",
+               "li $t0, 0x600000", "lw $v0, 0x1008($t0)", "sw $v0, 0x1010($zero)", "break"]
+        code, _ = Ks(KS_ARCH_MIPS, KS_MODE_MIPS32 | KS_MODE_LITTLE_ENDIAN).asm("\n".join(asm))
+        instructions = list(struct.unpack("<%dI" % (len(code)//4), bytes(code)))
     (root / "code.bin").write_bytes(struct.pack("<%dI" % len(instructions), *instructions))
     (root / "machine.json").write_text(json.dumps({"entry_address": 0, "memory_mapping": [
         {"name": "ram", "address": 0, "size": 0x200000, "file": str(root / "code.bin")}] }))
@@ -208,6 +221,9 @@ def child(directory, read_completion=False, capture=False, software=None, rcal=N
         profile["ports"]["0"]["reset_registers"] = {"341": {
             "value": 0x34567 if software[0] == 8 else 0xabcde,
             "source": "analysis-assumption", "reason": "synthetic native storage test"}}
+    if idle_line is not None:
+        profile["idle_mipi_ports"] = {"7": dict(kind="standard-mipi-idle-line-analysis/v1",
+            source="analysis-assumption", reason="native test only, no physical target", idle_level=idle_line)}
     if rcal:
         profile["ports"]["0"]["calibration"] = dict(kind="mt6177m-rcal-analysis/v1",
             source="analysis-assumption", reason="synthetic native RCAL test", cw10=rcal[0], cw11=rcal[1], trim5=rcal[2])
@@ -280,6 +296,20 @@ def child(directory, read_completion=False, capture=False, software=None, rcal=N
 
 
 class NativeBsiTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_BSI") == "1", "requires development PANDA")
+    def test_guest_idle_line_is_opt_in_and_does_not_complete_unconfigured_ports(self):
+        for mode, level in (("--child-idle-low", 0), ("--child-idle-high", 1)):
+            report = self.run_child(mode)
+            self.assertEqual(report["exception_index"], 18)
+            self.assertEqual(report["guest_words"], [level*0x1ff, 1, 1, 0, 1])
+            device, other = report["devices"]
+            self.assertEqual(device["completed_reads"], 1)
+            self.assertEqual(device["pending_blockers"][0]["reason"], "no-target-on-port")
+            self.assertEqual(device["pending"][0]["port"], 8)
+            self.assertEqual(device["serial_targets"]["7"]["reads"], 1)
+            self.assertEqual(other["serial_targets"]["7"]["reads"], 0)
+            self.assertFalse(device["serial_targets"]["7"]["target_identity_supplied"])
+
     @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_BSI") == "1", "requires development PANDA")
     def test_guest_tpd_preserves_backup_bits_and_gates_results(self):
         for mode,values in (("--child-rx-tpd",(5,11,0xa5d23,0x35e45)),
@@ -409,12 +439,13 @@ class NativeBsiTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] in ("--child", "--child-read", "--child-capture", "--child-software", "--child-software-coful", "--child-rcal", "--child-rcal-other", "--child-ldo", "--child-ldo-other", "--child-clock", "--child-clock-other", "--child-rx-rc", "--child-rx-rc-zero", "--child-rx-rc-max", "--child-rx-tpd", "--child-rx-tpd-other"):
+    if len(sys.argv) == 3 and sys.argv[1] in ("--child-idle-low", "--child-idle-high", "--child", "--child-read", "--child-capture", "--child-software", "--child-software-coful", "--child-rcal", "--child-rcal-other", "--child-ldo", "--child-ldo-other", "--child-clock", "--child-clock-other", "--child-rx-rc", "--child-rx-rc-zero", "--child-rx-rc-max", "--child-rx-tpd", "--child-rx-tpd-other"):
         software = {"--child-software": (8, 0), "--child-software-coful": (12, 2)}.get(sys.argv[1])
         rcal = {"--child-rcal": (0x84210, 0x739ce, 16), "--child-rcal-other": (1, 0xfffff, 31)}.get(sys.argv[1])
         ldo = {"--child-ldo": (7,19), "--child-ldo-other": (0,31)}.get(sys.argv[1])
         clock_trial = {"--child-clock":(0,0x21485),"--child-clock-other":(1023,0xabcde)}.get(sys.argv[1])
         rx_rc = {"--child-rx-rc":23,"--child-rx-rc-zero":0,"--child-rx-rc-max":63}.get(sys.argv[1])
         rx_tpd = {"--child-rx-tpd":(5,11,0xa5d23,0x35e45),"--child-rx-tpd-other":(0,15,0,0xfffff)}.get(sys.argv[1])
-        child(sys.argv[2], sys.argv[1] == "--child-read", sys.argv[1] == "--child-capture", (8, 0) if rcal or ldo or clock_trial or rx_rc is not None or rx_tpd else software, rcal, ldo, clock_trial, rx_rc, rx_tpd)
+        idle_line = {"--child-idle-low":0,"--child-idle-high":1}.get(sys.argv[1])
+        child(sys.argv[2], sys.argv[1] == "--child-read", sys.argv[1] == "--child-capture", (8, 0) if rcal or ldo or clock_trial or rx_rc is not None or rx_tpd or idle_line is not None else software, rcal, ldo, clock_trial, rx_rc, rx_tpd, idle_line)
     else: unittest.main()

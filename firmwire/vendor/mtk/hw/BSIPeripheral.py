@@ -1,7 +1,8 @@
 """Relocatable adapter for explicit digital BSI observation/pending modes."""
 from firmwire.hw.peripheral import PassthroughPeripheral
 from .bsi import BsiImmediateControl, ReadCompletionLayout, SerialCommand
-from .rf_serial import SerialBus, WriteCaptureTarget, SoftwareMt6177Target, validate_software_rf_profile
+from .rf_serial import (SerialBus, WriteCaptureTarget, SoftwareMt6177Target,
+                        IdleLineMipiTarget, validate_software_rf_profile)
 from .hwpor import HwporLayout, HwporSequencer
 
 
@@ -17,8 +18,11 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
         if software:
             self.rf_profile = validate_software_rf_profile(rf_profile,
                 self.machine.loader.capability_report["rom_sha256"])
-            bus = SerialBus({int(port): SoftwareMt6177Target(**identity)
-                             for port, identity in self.rf_profile["ports"].items()})
+            targets = {int(port): SoftwareMt6177Target(**identity)
+                       for port, identity in self.rf_profile["ports"].items()}
+            targets.update({int(port): IdleLineMipiTarget(config)
+                            for port, config in self.rf_profile.get("idle_mipi_ports", {}).items()})
+            bus = SerialBus(targets)
         self.control = BsiImmediateControl(size=size, mode="pending" if capture or software else bsi_mode,
             read_layout=ReadCompletionLayout(0x1204, 0x1200, (0, 2)),
             serial_bus=bus)
@@ -27,6 +31,9 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
         if software:
             self.log.warning("SOFTWARE RF ANALYSIS %s: assumed identity/ECO %s; no silicon/calibration fidelity",
                              self.rf_profile["name"], self.rf_profile["ports"])
+            if self.rf_profile.get("idle_mipi_ports"):
+                self.log.warning("IDLE MIPI LINE ANALYSIS %s: no target identity/registers, assumed line levels %s",
+                                 self.rf_profile["name"], self.rf_profile["idle_mipi_ports"])
         self.log.warning("BSI %s analysis: RF/DSP not emulated; write capture=%s; no generated read data",
                          bsi_mode, capture)
 
