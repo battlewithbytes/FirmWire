@@ -120,6 +120,36 @@ Facts/logs retain the policy, substitution counter and bounded recent addresses;
 the capability report's unresolved-unknown rule applies outside explicit registers
 and this declared read policy. No existing strict/default profile changes.
 
+### Optional digital aliases and key gate
+
+`hw/pmic_digital.py` is a separate reusable device component, not part of the
+WACS or BSI transports. Kind `bounded-digital-register-map-analysis/v1` requires
+the bounded read policy above plus:
+
+- `aliases`: canonical address keys with `{ "target": integer, "operation":
+  "set" | "clear" }`. Targets must be declared ordinary registers, not aliases
+  or the key register. Writes update the target under its mask. Unknown preserved
+  bits/read-only targets remain unresolved. Alias addresses do not become storage.
+- `key_policy`: null, or `{ "address", "unlock_value", "lock_value", "protected",
+  "reason" }`. The key address must have an explicit ordinary read policy and zero
+  ordinary write mask. Only the declared unlock/lock values change the separate
+  latch. Protected targets (including writes through aliases) require unlock.
+  Invalid key values and locked writes remain unresolved without mutation.
+- `reject_write_bits`: canonical ordinary-register address keys with nonzero
+  16-bit masks. Writes requesting these unmodelled effects remain unresolved,
+  including alias writes. This is not silent bit clearing or a reset simulation.
+
+The gate begins locked on whole-device reset; transport reset leaves it alone.
+Facts include alias/key counts, latch state and the last 32 completed writes.
+Key readback remains the explicitly configured storage value, not implicit echo
+of an unlock word. Alias reads are unresolved by the device; an enclosing explicit
+bounded read policy may substitute values for those unlisted addresses.
+
+These are **software-analysis semantics**, not a verified PMIC protection matrix,
+voltage-ready response, oscillator lock, interrupt or analog reset model. The
+profile owns all addresses, values and permission membership; the device class
+contains no firmware PCs, hashes or chipset register constants.
+
 WACS command: write flag bit 31, address `(command[30:16] << 1)`, data low 16
 bits. The write flag is excluded from the address (including high-address tests).
 Status carries data low 16, FSM bits 18:16, and a configurable init-done bit
@@ -186,13 +216,25 @@ configuration, ROM binding, missing/ambiguous wrapper selection, port conflicts,
 instance isolation, native-only gating, and target identity through the real
 loader memory map and machine realization path (Avatar range registration mocked).
 
-## Still required for Lagos
+## Lagos experiment and remaining boundary
 
-Identify/select the PMIC variant; review ordinary versus protected/aliased DCXO
-fields; supply explicit evidence or labelled assumptions for necessary reset
-values. Real-machine WACS/BSI composition is now wired and tested, but no Lagos
-profile is selected. Earlier boot performs a broad PMIC scan: strict handling may
-stop there before DCXO. Do not seed thousands of legacy zero results as reset facts.
-Then rerun unchanged firmware and verify DCXO pre-init/init return. Simply
-allowing every PMIC write or copying the old wrapper's zeros into a register
-map is not that validation. No new mtkloader parser requirement is established.
+Cockpit now supplies an explicit, ROM-bound digital-analysis profile: synthetic
+identity, bounded zero-read substitution, ordinary configuration storage,
+regulator SET/CLR aliases and a labelled two-register protection gate. No profile
+is selected by default. The protection membership and reset values remain
+analysis assumptions, not verified MT6358 silicon facts.
+
+The first unchanged-image run with this profile returned from the PMIC scan and
+initializer, completed 17 regulator alias writes, then completed DCXO pre-init's
+five BSI writes (configuration, unlock, two protected writes, relock). The next
+write, `0x0794ffc4`, remained unresolved because address `0x0794` was not declared.
+Firmware timed out; its error path then triggered the existing PCCIF ring-16
+host assertion. This is partial device progress, **not a healthy full boot**.
+
+Cockpit retains that negative fixture separately from the subsequent CDAC trial.
+Two-image Ghidra evidence shows Lagos and Coful construct the same CW04 command
+from an eight-bit caller argument; the older MT6358 header identifies two eight-bit
+CDAC configuration fields. A separate profile may add ordinary storage for them
+without changing this device class or fabricating oscillator readiness. Later
+DCXO init, sustained tasks and AP communication still require live verification.
+No new mtkloader parser requirement is established.

@@ -8,6 +8,7 @@ import re
 
 from .hw.pmic import PmicTarget, PmicRegisterMapAnalysis, PmicRegisterSpec
 from .hw.pmic_read_policy import PmicReadPolicy, PmicReadPolicyAnalysis
+from .hw.pmic_digital import PmicDigitalAnalysis, PmicAliasSpec, PmicKeySpec
 
 
 def _unique_object(pairs):
@@ -50,12 +51,16 @@ def load_pmic_analysis(path, rom_sha256, *, boot_mode, bsi_mode):
         raise ValueError("PMIC profile exceeds 64 KiB")
     config = json.loads(raw, object_pairs_hook=_unique_object)
     keys = {"schema", "kind", "rom_sha256", "name", "source", "reason", "wrapper_name", "bsi_port", "registers"}
-    bounded_reads = isinstance(config, dict) and config.get("kind") == "bounded-read-register-map-analysis/v1"
+    digital = isinstance(config, dict) and config.get("kind") == "bounded-digital-register-map-analysis/v1"
+    bounded_reads = digital or isinstance(config, dict) and config.get("kind") == "bounded-read-register-map-analysis/v1"
     if bounded_reads:
         keys.add("read_policy")
+    if digital:
+        keys.update(("aliases", "key_policy", "reject_write_bits"))
     if (not isinstance(config, dict) or set(config) != keys
             or config["schema"] != "firmwire.pmic-analysis/v1"
-            or config["kind"] not in ("plain-register-map-analysis/v1", "bounded-read-register-map-analysis/v1")
+            or config["kind"] not in ("plain-register-map-analysis/v1", "bounded-read-register-map-analysis/v1",
+                                      "bounded-digital-register-map-analysis/v1")
             or not isinstance(rom_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", rom_sha256)
             or config["rom_sha256"] != rom_sha256
             or config["source"] != "analysis-assumption"
@@ -74,6 +79,28 @@ def load_pmic_analysis(path, rom_sha256, *, boot_mode, bsi_mode):
             raise ValueError("PMIC register needs a canonical address and explicit storage policy")
         registers[int(address)] = PmicRegisterSpec(entry["reset_value"], entry["write_mask"], entry["readable"])
     target = PmicRegisterMapAnalysis(registers, reason=config["reason"])
+    if digital:
+        def addresses(entries):
+            if (not isinstance(entries, dict) or len(entries) > 256
+                    or any(not re.fullmatch(r"0|[1-9][0-9]{0,4}", a) or int(a) > 65535 for a in entries)):
+                raise ValueError("Digital PMIC maps require bounded canonical addresses")
+            return {int(a): entry for a, entry in entries.items()}
+        aliases = {}
+        for address, entry in addresses(config["aliases"]).items():
+            if not isinstance(entry, dict) or set(entry) != {"target", "operation"}:
+                raise ValueError("PMIC alias requires target and operation")
+            aliases[address] = PmicAliasSpec(**entry)
+        key = config["key_policy"]
+        if key is not None:
+            if (not isinstance(key, dict)
+                    or set(key) != {"address", "unlock_value", "lock_value", "protected", "reason"}
+                    or not isinstance(key["protected"], list)
+                    or any(type(a) is not int for a in key["protected"])
+                    or len(set(key["protected"])) != len(key["protected"])):
+                raise ValueError("Invalid digital PMIC key configuration")
+            key = PmicKeySpec(**{**key, "protected": frozenset(key["protected"])})
+        target = PmicDigitalAnalysis(registers, aliases=aliases, key=key,
+            reject_write_bits=addresses(config["reject_write_bits"]), reason=config["reason"])
     if bounded_reads:
         policy = config["read_policy"]
         if (not isinstance(policy, dict) or set(policy) != {"start", "end", "stride", "value", "reason"}):

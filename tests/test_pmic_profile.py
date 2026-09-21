@@ -135,6 +135,33 @@ class PmicProfileTests(unittest.TestCase):
             self.assertEqual(wacs.hw_read(0xc04,4),1<<22 | 6<<16 | 0x6789)
             self.assertFalse(loader.capability_report["pmic_analysis"]["boot_verified"])
 
+    def test_digital_json_composes_alias_gate_and_bounded_read_policy(self):
+        config=self.profile()
+        config.update(kind="bounded-digital-register-map-analysis/v1",
+            read_policy=dict(start=0,end=100,stride=2,value=0,reason="synthetic"),
+            aliases={"38":dict(target=36,operation="set")},
+            key_policy=dict(address=44,unlock_value=55,lock_value=0,protected=[36],reason="synthetic"),
+            reject_write_bits={"36":32768})
+        config["registers"]["44"]=dict(reset_value=0,write_mask=0,readable=True,reason="synthetic key read")
+        with tempfile.TemporaryDirectory() as directory:
+            binding=self.load(self.write(directory,config),"a"*64,boot_mode="native",bsi_mode="mt6768-pending")
+            target=binding.target
+            self.assertEqual(target.read(2).value,0)
+            self.assertEqual(target.write(38,8).reason,"pmic-protected-write-locked")
+            target.write(44,55);target.write(38,8)
+            self.assertEqual(target.read(36).value,0x135f)
+            self.assertEqual(target.write(36,32768).status,"unresolved")
+            target.write(44,0)
+            self.assertFalse(target.facts()["device"]["key_unlocked"])
+            for field,value in (("aliases",{"036":dict(target=36,operation="set")}),
+                                ("aliases",{"38":dict(target=40,operation="set")}),
+                                ("key_policy",dict(config["key_policy"],protected=[36,36])),
+                                ("key_policy",dict(config["key_policy"],protected=[True])),
+                                ("reject_write_bits",{"38":32768})):
+                bad=copy.deepcopy(config);bad[field]=value
+                with self.subTest(field=field,value=value),self.assertRaises(ValueError):
+                    self.load(self.write(directory,bad),"a"*64,boot_mode="native",bsi_mode="mt6768-pending")
+
     def test_absent_profile_keeps_legacy_wrapper_and_no_shared_target(self):
         loader = self.loader()
         loader.build_memory_map()
