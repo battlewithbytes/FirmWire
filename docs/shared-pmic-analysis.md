@@ -103,6 +103,23 @@ subclass of `PmicTarget` can add those behaviors without changing transport code
 
 ## Transport and lifecycle contracts
 
+### Optional bounded read policy
+
+The separate `hw/pmic_read_policy.py` component supports an explicitly approved
+software-only read substitution. Profile kind
+`bounded-read-register-map-analysis/v1` requires an additional `read_policy`
+object with `start`, inclusive `end`, `stride` (1/2/4), `value` and `reason`.
+All addresses/values remain 16-bit and the endpoints must lie on the stride.
+Only unlisted addresses in that range receive the declared value. Explicit
+unknown or unreadable registers take precedence and remain unresolved.
+
+Reads never allocate registers or permit writes. Every unmodelled write remains
+unresolved. This policy is address-based, not scan-PC-based, so it also applies
+to later reads of those addresses. It is not a reset table or silicon evidence.
+Facts/logs retain the policy, substitution counter and bounded recent addresses;
+the capability report's unresolved-unknown rule applies outside explicit registers
+and this declared read policy. No existing strict/default profile changes.
+
 WACS command: write flag bit 31, address `(command[30:16] << 1)`, data low 16
 bits. The write flag is excluded from the address (including high-address tests).
 Status carries data low 16, FSM bits 18:16, and a configurable init-done bit

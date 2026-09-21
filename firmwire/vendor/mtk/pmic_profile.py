@@ -3,9 +3,11 @@ import copy
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import re
 
-from .hw.pmic import PmicRegisterMapAnalysis, PmicRegisterSpec
+from .hw.pmic import PmicTarget, PmicRegisterMapAnalysis, PmicRegisterSpec
+from .hw.pmic_read_policy import PmicReadPolicy, PmicReadPolicyAnalysis
 
 
 def _unique_object(pairs):
@@ -21,7 +23,7 @@ def _unique_object(pairs):
 class PmicAnalysisBinding:
     profile: dict
     profile_sha256: str
-    target: PmicRegisterMapAnalysis
+    target: PmicTarget
 
     @property
     def wrapper_name(self):
@@ -34,7 +36,9 @@ class PmicAnalysisBinding:
     def facts(self):
         return dict(profile=copy.deepcopy(self.profile), profile_sha256=self.profile_sha256,
                     hardware_family_selected=None, silicon_verified=False, boot_verified=False,
-                    unknown_access_policy="unresolved", shared_target=True)
+                    unknown_access_policy="unresolved", shared_target=True,
+                    unknown_access_policy_scope="outside-explicit-registers-and-read-policy",
+                    synthetic_read_policy=copy.deepcopy(self.profile.get("read_policy")))
 
 
 def load_pmic_analysis(path, rom_sha256, *, boot_mode, bsi_mode):
@@ -46,9 +50,12 @@ def load_pmic_analysis(path, rom_sha256, *, boot_mode, bsi_mode):
         raise ValueError("PMIC profile exceeds 64 KiB")
     config = json.loads(raw, object_pairs_hook=_unique_object)
     keys = {"schema", "kind", "rom_sha256", "name", "source", "reason", "wrapper_name", "bsi_port", "registers"}
+    bounded_reads = isinstance(config, dict) and config.get("kind") == "bounded-read-register-map-analysis/v1"
+    if bounded_reads:
+        keys.add("read_policy")
     if (not isinstance(config, dict) or set(config) != keys
             or config["schema"] != "firmwire.pmic-analysis/v1"
-            or config["kind"] != "plain-register-map-analysis/v1"
+            or config["kind"] not in ("plain-register-map-analysis/v1", "bounded-read-register-map-analysis/v1")
             or not isinstance(rom_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", rom_sha256)
             or config["rom_sha256"] != rom_sha256
             or config["source"] != "analysis-assumption"
@@ -67,6 +74,15 @@ def load_pmic_analysis(path, rom_sha256, *, boot_mode, bsi_mode):
             raise ValueError("PMIC register needs a canonical address and explicit storage policy")
         registers[int(address)] = PmicRegisterSpec(entry["reset_value"], entry["write_mask"], entry["readable"])
     target = PmicRegisterMapAnalysis(registers, reason=config["reason"])
+    if bounded_reads:
+        policy = config["read_policy"]
+        if (not isinstance(policy, dict) or set(policy) != {"start", "end", "stride", "value", "reason"}):
+            raise ValueError("Bounded PMIC reads require explicit limits, value and reason")
+        target = PmicReadPolicyAnalysis(target, set(registers), PmicReadPolicy(**policy))
+        logging.getLogger(__name__).warning(
+            "BOUNDED PMIC READ ANALYSIS: synthetic value %#x for %#x..%#x stride %d; "
+            "explicit registers override; writes remain strict; not hardware reset evidence",
+            policy["value"], policy["start"], policy["end"], policy["stride"])
     return PmicAnalysisBinding(copy.deepcopy(config), hashlib.sha256(raw).hexdigest(), target)
 
 

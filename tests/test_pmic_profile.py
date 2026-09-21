@@ -86,6 +86,7 @@ class PmicProfileTests(unittest.TestCase):
                 loader = self.loader(path); loader.loader_args["bsi"] = mode
                 with self.assertRaises(ValueError): loader.build_memory_map()
                 loader.add_memory_range.assert_not_called()
+
             for alteration in ("wrong-rom","rehosted","missing","duplicate","wrong-type"):
                 loader = self.loader(path)
                 if alteration=="wrong-rom": loader.capability_report["rom_sha256"]="b"*64
@@ -95,6 +96,24 @@ class PmicProfileTests(unittest.TestCase):
                 if alteration=="wrong-type": loader.modem_soc.peripherals[0]._cls=object
                 with self.assertRaises(ValueError): loader.build_memory_map()
                 loader.add_memory_range.assert_not_called()
+
+    def test_bounded_read_kind_requires_explicit_policy_and_preserves_strict_writes(self):
+        config=self.profile()
+        config["kind"]="bounded-read-register-map-analysis/v1"
+        config["read_policy"]=dict(start=0,end=100,stride=2,value=0x1234,reason="synthetic range")
+        with tempfile.TemporaryDirectory() as directory:
+            binding=self.load(self.write(directory,config),"a"*64,boot_mode="native",bsi_mode="mt6768-pending")
+            self.assertEqual(binding.target.read(0).value,0x1234)
+            self.assertEqual(binding.target.read(36).value,0x1357)
+            self.assertEqual(binding.target.write(0,0).status,"unresolved")
+            self.assertEqual(binding.facts()["synthetic_read_policy"],config["read_policy"])
+            for invalid in (None,{},dict(config["read_policy"],extra=0),dict(config["read_policy"],start=True)):
+                bad=copy.deepcopy(config);bad["read_policy"]=invalid
+                with self.assertRaises(ValueError):
+                    self.load(self.write(directory,bad),"a"*64,boot_mode="native",bsi_mode="mt6768-pending")
+            del config["read_policy"]
+            with self.assertRaises(ValueError):
+                self.load(self.write(directory,config),"a"*64,boot_mode="native",bsi_mode="mt6768-pending")
 
     def test_loader_passes_one_target_to_actual_wacs_and_bsi_constructors(self):
         with tempfile.TemporaryDirectory() as directory:
