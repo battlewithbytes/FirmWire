@@ -33,6 +33,7 @@ from .hw.BSIPeripheral import BSIImmediatePeripheral
 from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
 from .hw.d2bif import MTKD2BIFStorageAnalysisPeripheral
+from .hw.mipi import MTKMipiInitCapturePeripheral
 from .hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral,
                            MTKLTETimerInitStorageAnalysisPeripheral, MTKLTETimerGroupCancelAnalysisPeripheral,
                            MTKLTETimerEventCancelAnalysisPeripheral)
@@ -87,6 +88,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "mipi": {
+            "type": str, "choices": ["disabled", "mt6768-init-capture-analysis"], "default": "disabled",
+            "help": "OPT-IN UNVERIFIED MIPI initializer write capture; no reads, transactions or IRQ effects",
+        },
         "d2bif": {
             "type": str, "choices": ["disabled", "93xx-storage-analysis"], "default": "disabled",
             "help": "OPT-IN UNVERIFIED D2BIF two-word storage hypothesis; no DMA or IRQ effects",
@@ -529,6 +534,18 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        mipi_abi = self.loader_args.get("mipi", "disabled")
+        if mipi_abi not in ("disabled", "mt6768-init-capture-analysis"):
+            raise ValueError("Unsupported MIPI ABI")
+        if mipi_abi != "disabled":
+            if self.boot_mode != "native":
+                raise ValueError("MIPI initialization capture requires native boot mode")
+            self.add_memory_range(0xA6173000, 0x5000, name="MIPI_INIT_CAPTURE",
+                                  emulate=MTKMipiInitCapturePeripheral, permissions="rw-")
+            self.capability_report["mipi"] = dict(
+                MTKMipiInitCapturePeripheral.analysis_facts(),
+                abi=mipi_abi, physical_base=0xA6173000, size=0x5000)
+            self.write_capability_report()
         d2bif_abi = self.loader_args.get("d2bif", "disabled")
         if d2bif_abi not in ("disabled", "93xx-storage-analysis"):
             raise ValueError("Unsupported D2BIF ABI")
