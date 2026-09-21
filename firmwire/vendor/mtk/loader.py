@@ -34,6 +34,7 @@ from .hw.idc_uart import MTKIDCUARTPeripheral
 from .hw.idc_control import MTKIDCControlPeripheral
 from .hw.d2bif import MTKD2BIFStorageAnalysisPeripheral
 from .hw.mipi import MTKMipiInitCapturePeripheral
+from .hw.bsi_scheduler import MTKBsiSchedulerCapturePeripheral
 from .hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral,
                            MTKLTETimerInitStorageAnalysisPeripheral, MTKLTETimerGroupCancelAnalysisPeripheral,
                            MTKLTETimerEventCancelAnalysisPeripheral)
@@ -88,6 +89,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "bsi_scheduler": {
+            "type": str, "choices": ["disabled", "mt6768-enable-capture-analysis"], "default": "disabled",
+            "help": "OPT-IN UNVERIFIED BSI scheduler write capture; no inferred enable policy, readback, dispatch or IRQs",
+        },
         "mipi": {
             "type": str, "choices": ["disabled", "mt6768-init-capture-analysis"], "default": "disabled",
             "help": "OPT-IN UNVERIFIED MIPI initializer write capture; no reads, transactions or IRQ effects",
@@ -534,6 +539,18 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        scheduler_abi = self.loader_args.get("bsi_scheduler", "disabled")
+        if scheduler_abi not in ("disabled", "mt6768-enable-capture-analysis"):
+            raise ValueError("Unsupported BSI scheduler ABI")
+        if scheduler_abi != "disabled":
+            if self.boot_mode != "native":
+                raise ValueError("BSI scheduler analysis requires native boot mode")
+            self.add_memory_range(0xA6150000, 0x1000, name="BSI_SCHEDULER",
+                                  emulate=MTKBsiSchedulerCapturePeripheral, permissions="rw-")
+            self.capability_report["bsi_scheduler"] = dict(
+                MTKBsiSchedulerCapturePeripheral.analysis_facts(),
+                abi=scheduler_abi, physical_base=0xA6150000, size=0x1000)
+            self.write_capability_report()
         mipi_abi = self.loader_args.get("mipi", "disabled")
         if mipi_abi not in ("disabled", "mt6768-init-capture-analysis"):
             raise ValueError("Unsupported MIPI ABI")
