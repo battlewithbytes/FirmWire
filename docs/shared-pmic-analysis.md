@@ -61,6 +61,9 @@ port must not collide with RF/MIPI endpoints. The capability report includes the
 profile hash, shared-target flag, unresolved-unknown policy, and false boot/silicon
 claims. Unknown accesses stay pending with no legacy fallback inside this mode.
 Snapshot creation/restoration is refused early; use cold restarts.
+Read-only machine observation may request the selected wrapper's name in
+`peripheral_controls`. It is allowed only if the realized wrapper holds the exact
+target object in the loader binding; no arbitrary peripheral name is admitted.
 
 ## Minimal composition
 

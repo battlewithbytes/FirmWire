@@ -107,6 +107,33 @@ class CheckpointAdapterTests(unittest.TestCase):
             self.assertEqual(execution["cpu_exceptions"]["first"][0]["preceding_unassigned_io"][-1]["physical_address"],0x160b0024)
             self.assertTrue(self.saved[-1]["ram_observer"]["unassigned_io"])
 
+    def test_pmic_observer_requires_selected_wrapper_and_identical_target(self):
+        for name in ("SYNTHETIC_PMIC_A", "RELOCATED_WRAPPER_B"):
+            with tempfile.TemporaryDirectory() as directory:
+                machine = self.make_machine(self.profile(directory, peripheral_controls=[name]))
+                target = object()
+                control = SimpleNamespace(pmic_target=target, enable_control_observer=Mock(),
+                    control_observation=lambda: {"kind": "shared-pmic-wrapper-analysis/v1"})
+                machine.loader.pmic_analysis_binding = SimpleNamespace(wrapper_name=name, target=target)
+                machine.peripheral_map[name] = control
+                install(machine)
+                self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
+                control.enable_control_observer.assert_called_once()
+                self.assertEqual(self.saved[-1]["execution"]["peripheral_controls"][name],
+                                 {"kind": "shared-pmic-wrapper-analysis/v1"})
+        for mismatch in ("no-binding", "wrong-target", "wrong-name", "missing-wrapper"):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(mismatch=mismatch):
+                machine = self.make_machine(self.profile(directory, peripheral_controls=["PMIC_TEST"]))
+                target = object()
+                machine.loader.pmic_analysis_binding = SimpleNamespace(wrapper_name="PMIC_TEST", target=target)
+                machine.peripheral_map["PMIC_TEST"] = SimpleNamespace(pmic_target=target,
+                    enable_control_observer=Mock(), control_observation=Mock())
+                if mismatch == "no-binding": machine.loader.pmic_analysis_binding = None
+                if mismatch == "wrong-target": machine.peripheral_map["PMIC_TEST"].pmic_target = object()
+                if mismatch == "wrong-name": machine.loader.pmic_analysis_binding.wrapper_name = "OTHER"
+                if mismatch == "missing-wrapper": machine.peripheral_map.clear()
+                with self.assertRaisesRegex(ValueError, "Unsupported control observer"): install(machine)
+
     def test_d2bif_observer_is_explicit_and_keeps_analysis_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             machine = self.make_machine(self.profile(directory, peripheral_controls=["D2BIF", "LTE_TIMER"]))

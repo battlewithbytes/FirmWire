@@ -785,10 +785,17 @@ class MT6878Machine(FirmWireEmu):
                 install_v0_trace(self.panda, config["v0_trace"], report, context_labels,
                                  self.loader.write_capability_report)
             requested_controls = config.get("peripheral_controls", [])
+            allowed_controls = {"AES_TOP0", "MODEML1_AO_BSI_MM_2", "IDC_CTRL", "LTE_TIMER", "D2BIF"}
+            pmic_binding = getattr(self.loader, "pmic_analysis_binding", None)
+            if pmic_binding is not None:
+                wrapper = self.peripheral_map.get(pmic_binding.wrapper_name)
+                if (wrapper is not None
+                        and getattr(wrapper, "pmic_target", None) is pmic_binding.target):
+                    allowed_controls.add(pmic_binding.wrapper_name)
             if (not isinstance(requested_controls, list) or len(requested_controls) > 5
-                    or any(name not in ("AES_TOP0", "MODEML1_AO_BSI_MM_2", "IDC_CTRL", "LTE_TIMER", "D2BIF") for name in requested_controls)
+                    or any(not isinstance(name, str) or name not in allowed_controls for name in requested_controls)
                     or len(set(requested_controls)) != len(requested_controls)):
-                raise ValueError("Only explicit AES_TOP0/BSI/IDC_CTRL/LTE_TIMER/D2BIF control observers are supported")
+                raise ValueError("Unsupported control observer; PMIC requires the explicitly bound shared wrapper")
             for name in requested_controls:
                 peripheral = self.peripheral_map.get(name)
                 if peripheral is None or not hasattr(peripheral, "enable_control_observer"):
