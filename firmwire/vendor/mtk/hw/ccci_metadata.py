@@ -3,7 +3,7 @@ import struct
 
 
 def packet_metadata(packet):
-    """Describe the existing 16-byte header without dumping data or reserved words.
+    """Describe the existing 16-byte header without dumping payload or reserved words.
 
     A zero data0 gives a candidate stream-length comparison, not a validity
     gate: data1 can have other meanings in channel-specific contracts. Mailbox
@@ -20,6 +20,10 @@ def packet_metadata(packet):
                                   "mailbox" if data0 == 0xffffffff else "unclassified")
         if data0 == 0:
             result.update(declared_stream_length=data1, stream_length_matches=data1 == len(packet))
+        elif data0 == 0xffffffff:
+            # Mailbox data1 is an opaque command ID, not a stream length.
+            # Parameters in reserved remain private and are never dereferenced.
+            result["mailbox_message_id"] = data1
     return result
 
 

@@ -12,6 +12,7 @@ import lz4.frame
 import re
 import pickle
 import json
+import hashlib
 
 from io import BytesIO
 from os import stat
@@ -41,6 +42,7 @@ from .hw.lte_timer import (MTKLTETimerRRPeripheral, MTKLTETimerControlPeripheral
 from .hw.PCCIFPeripheral import PCCIF_Periph
 from .hw.ccci_ipc import unavailable_wmt_dispatcher
 from .hw.ccci_ports import ClosedAPPorts
+from .ccci_mailbox_profile import build_mailbox_profile
 from firmwire.vendor.mtk.consts import ROM_BASE_ADDR
 
 MAGIC = 0x58881688
@@ -104,6 +106,10 @@ class MTKLoader(firmwire.loader.Loader):
         "lte_timer": {
             "type": str, "choices": ["disabled", "93xx-rr-config", "93xx-control", "93xx-init-storage-analysis", "93xx-group-cancel-analysis", "93xx-event-cancel-analysis"], "default": "disabled",
             "help": "OPT-IN LTE profiles; analysis variants have UNVERIFIED init storage and optional queued-event cancellation, not a running timer",
+        },
+        "ccci_mailbox_profile": {
+            "type": PurePath, "default": None,
+            "help": "OPT-IN reviewed mailbox services with synthetic AP state; no real AP peer",
         },
         "ccci_closed_ports": {
             "type": PurePath, "default": None,
@@ -519,6 +525,21 @@ class MTKLoader(firmwire.loader.Loader):
             with open(ports_path) as source:
                 ports_profile = json.load(source)
             ClosedAPPorts(ports_profile)  # Validate before creating any mappings.
+        mailbox_path = self.loader_args.get("ccci_mailbox_profile")
+        mailbox_dispatcher = mailbox_facts = None
+        if mailbox_path is not None:
+            if self.boot_mode != "native":
+                raise ValueError("Mailbox analysis requires native boot mode")
+            with open(mailbox_path, "rb") as source:
+                raw = source.read()
+            mailbox_dispatcher, mailbox_facts = build_mailbox_profile(json.loads(raw))
+            mailbox_facts["profile_sha256"] = hashlib.sha256(raw).hexdigest()
+            if ports_profile is not None:
+                mailbox_dispatcher.validate_channels(ClosedAPPorts(ports_profile).channels)
+            targets = [p for p in self.modem_soc.peripherals
+                       if issubclass(p._cls, PCCIF_Periph) and p._attr.get("pccifid") == 0]
+            if len(targets) != 1:
+                raise ValueError("Mailbox profile requires exactly one PCCIF0 transport")
         self.build_peripheral_maps()
 
         ########################
@@ -530,7 +551,7 @@ class MTKLoader(firmwire.loader.Loader):
                 attributes = dict(peripheral._attr)
                 attributes["pmic_target"] = self.pmic_analysis_binding.target
                 self.create_peripheral(peripheral, peripheral._address, peripheral._size, **attributes)
-            elif ((ipc_mode != "disabled" or ports_profile is not None) and issubclass(peripheral._cls, PCCIF_Periph)
+            elif ((ipc_mode != "disabled" or ports_profile is not None or mailbox_dispatcher is not None) and issubclass(peripheral._cls, PCCIF_Periph)
                     and peripheral._attr.get("pccifid") == 0):
                 attributes = dict(peripheral._attr)
                 if ipc_mode != "disabled":
@@ -543,6 +564,9 @@ class MTKLoader(firmwire.loader.Loader):
                 if ports_profile is not None:
                     attributes["closed_ports"] = ClosedAPPorts(ports_profile)
                     self.capability_report["ccci_closed_ports"] = attributes["closed_ports"].facts()
+                if mailbox_dispatcher is not None:
+                    attributes["mailbox_dispatcher"] = mailbox_dispatcher
+                    self.capability_report["ccci_mailbox"] = mailbox_facts
                 self.create_peripheral(peripheral, peripheral._address, peripheral._size, **attributes)
                 self.write_capability_report()
             else:

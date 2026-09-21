@@ -61,6 +61,7 @@ class CCCIMetadataTests(unittest.TestCase):
             self.assertEqual(facts["stream_length_matches"],True if data0 == 0 else None)
             self.assertNotIn(secret.decode(),json.dumps(facts))
             self.assertNotIn("reserved",facts)
+            self.assertEqual(facts.get("mailbox_message_id"),16+len(secret) if data0 == 0xffffffff else None)
         for length in range(16):
             facts = packet_metadata(b"x"*length)
             self.assertFalse(facts["header_complete"])

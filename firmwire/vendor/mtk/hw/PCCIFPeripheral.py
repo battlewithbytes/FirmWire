@@ -15,6 +15,7 @@ from .ap_properties import APSystemProperties
 from .ccci_metadata import packet_metadata, ipc_metadata
 from .ccci_ipc import IPCDispatcher
 from .ccci_ports import ClosedAPPorts
+from .ccci_mailbox import MailboxDispatcher
 
 # Linux: SMEM_USER_CCISM_MCU
 first_ringbuf_size = 721 * 1024
@@ -414,7 +415,7 @@ CCCI_RPC_TX = 33
 
 
 class PCCIF_Periph(PassthroughPeripheral):
-    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, ipc_dispatcher=None, closed_ports=None, **kwargs):
+    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, ipc_dispatcher=None, closed_ports=None, mailbox_dispatcher=None, **kwargs):
         super().__init__(name, address, size, **kwargs)
 
         self.pccifid = pccifid
@@ -430,6 +431,12 @@ class PCCIF_Periph(PassthroughPeripheral):
         if closed_ports is not None and not isinstance(closed_ports, ClosedAPPorts):
             raise ValueError("closed_ports must be a ClosedAPPorts instance")
         self.closed_ports = closed_ports
+        if mailbox_dispatcher is not None:
+            if not isinstance(mailbox_dispatcher, MailboxDispatcher):
+                raise ValueError("mailbox_dispatcher must be a MailboxDispatcher instance")
+            mailbox_dispatcher.validate_channels({0, 0xe, 0x20, 0x22})
+            mailbox_dispatcher.validate_channels(closed_ports.channels if closed_ports else ())
+        self.mailbox_dispatcher = mailbox_dispatcher
 
     # 0 CON, 4 BUSY, C TCHNUM, 14 ACK, 100 CHDATA
     def hw_read(self, offset, size):
@@ -531,6 +538,21 @@ class PCCIF_Periph(PassthroughPeripheral):
                 raise
             self.log.info("IPC disposition metadata=%s", json.dumps(
                 dict(metadata, disposition=disposition), sort_keys=True))
+        elif getattr(self, "mailbox_dispatcher", None) is not None and self.mailbox_dispatcher.accepts(channel):
+            try:
+                result = self.mailbox_dispatcher.receive(packet)
+                queued = False
+                if result.response is not None:
+                    if not ring.writePacket(result.response.encode()):
+                        raise RuntimeError("CCCI mailbox response queue failed")
+                    queued = True
+            except (ValueError, TypeError, NotImplementedError, RuntimeError):
+                self.log.error("Rejected mailbox metadata=%s", json.dumps(metadata, sort_keys=True))
+                raise
+            # Queueing is not guest receipt, application success, or an AP peer.
+            self.log.info("Mailbox disposition metadata=%s", json.dumps(dict(
+                metadata, disposition=result.disposition, response_queued=queued,
+                peer_connected=False, application_verified=False), sort_keys=True))
         elif getattr(self, "closed_ports", None) is not None and self.closed_ports.accepts(channel):
             disposition = self.closed_ports.receive(packet)
             self.log.info("Closed port disposition metadata=%s", json.dumps(
