@@ -133,6 +133,10 @@ class MTKLoader(firmwire.loader.Loader):
             "type": PurePath, "default": None,
             "help": "OPT-IN ROM-bound shared PMIC storage analysis; native pending/software-RF BSI only",
         },
+        "abbmix_analysis_profile": {
+            "type": PurePath, "default": None,
+            "help": "OPT-IN ROM-bound SOFTWARE ABB calibration results; no analog fidelity; native only",
+        },
         "mml2_mmu": {
             "type": str, "choices": ["disabled", "93xx-control"], "default": "disabled",
             "help": "OPT-IN reviewed 93xx MML2 MCU MMU control ABI; native analysis only, no translation/DMA",
@@ -547,6 +551,20 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_peripheral_maps(self):
+        abbmix = None
+        abbmix_path = self.loader_args.get("abbmix_analysis_profile")
+        if abbmix_path is not None:
+            from .abbmix_profile import load_abbmix_profile
+            from .hw.AbbMixPeripheral import AbbMixAnalysisPeripheral
+            abbmix = load_abbmix_profile(abbmix_path, self.capability_report["rom_sha256"],
+                                        boot_mode=self.boot_mode)
+            profile, calibration, profile_sha = abbmix
+            if (profile["base"] % 0x1000 or profile["size"] % 0x1000
+                    or not 0xA6190000 <= profile["base"] < profile["base"] + profile["size"] <= 0xA619E000):
+                raise ValueError("ABB analysis profile must fit page-aligned inside the existing ABBMIX window")
+            self.capability_report["abbmix_analysis"] = dict(
+                calibration.facts(), profile_sha256=profile_sha,
+                physical_base=profile["base"], size=profile["size"], profile=profile)
         self.pmic_analysis_binding = self.pmic_analysis_wrapper = None
         pmic_path = self.loader_args.get("pmic_analysis_profile")
         if pmic_path is not None:
@@ -914,12 +932,19 @@ class MTKLoader(firmwire.loader.Loader):
         self.add_memory_range(
             0xA6180000, 0x3000, name="BASE_MADDR_MODEML1_AO_BPI_MM", permissions="rw-"
         )
-        self.add_memory_range(
-            0xA6190000,
-            0xE000,
-            name="BASE_MADDR_MODEML1_AO_ABBMIX_PKR_P2P_TX",
-            permissions="rw-",
-        )
+        if abbmix is None:
+            self.add_memory_range(0xA6190000, 0xE000,
+                name="BASE_MADDR_MODEML1_AO_ABBMIX_PKR_P2P_TX", permissions="rw-")
+        else:
+            profile, calibration, profile_sha = abbmix
+            start, end = profile["base"], profile["base"] + profile["size"]
+            if start > 0xA6190000:
+                self.add_memory_range(0xA6190000, start - 0xA6190000,
+                    name="ABBMIX_PREFIX", permissions="rw-")
+            self.add_memory_range(start, profile["size"], name="ABBMIX_CAL",
+                emulate=AbbMixAnalysisPeripheral, calibration=calibration, permissions="rw-")
+            if end < 0xA619E000:
+                self.add_memory_range(end, 0xA619E000 - end, name="ABBMIX_SUFFIX", permissions="rw-")
         self.add_memory_range(
             0xA61A0000, 0x1000, name="BASE_MADDR_MODEML1_AO_C1X_TTR", permissions="rw-"
         )

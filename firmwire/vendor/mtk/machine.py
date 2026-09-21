@@ -786,6 +786,9 @@ class MT6878Machine(FirmWireEmu):
                                  self.loader.write_capability_report)
             requested_controls = config.get("peripheral_controls", [])
             allowed_controls = {"AES_TOP0", "MODEML1_AO_BSI_MM_2", "IDC_CTRL", "LTE_TIMER", "D2BIF"}
+            from .hw.AbbMixPeripheral import AbbMixAnalysisPeripheral
+            if isinstance(self.peripheral_map.get("ABBMIX_CAL"), AbbMixAnalysisPeripheral):
+                allowed_controls.add("ABBMIX_CAL")
             pmic_binding = getattr(self.loader, "pmic_analysis_binding", None)
             if pmic_binding is not None:
                 wrapper = self.peripheral_map.get(pmic_binding.wrapper_name)
