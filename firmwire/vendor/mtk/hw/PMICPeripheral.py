@@ -3,6 +3,7 @@
 import logging
 
 from . import PassthroughPeripheral
+from .pmic import PmicTarget, PmicWacsControl
 
 # see the Linux kernel driver (mtk-pmic-wrap)
 # modern WACS (wrapper access?) regs in order:
@@ -54,23 +55,50 @@ class WACS:
 
 
 class PMIC_WRAP_Periph(PassthroughPeripheral):
-    def __init__(self, name, address, size, **kwargs):
+    def __init__(self, name, address, size, pmic_target=None, **kwargs):
+        if pmic_target is not None and not isinstance(pmic_target, PmicTarget):
+            raise ValueError("Expected an explicit PMIC target")
         super().__init__(name, address, size, **kwargs)
 
+        self.pmic_target = pmic_target
         self.wacs = []
         wacs_init_done_off = kwargs.get("wacs_init_done_offset", 21)
         for n in range(4):
-            self.wacs.append(WACS(self.log, n, wacs_init_done_off))
+            self.wacs.append(PmicWacsControl(pmic_target, init_done_offset=wacs_init_done_off)
+                             if pmic_target is not None else WACS(self.log, n, wacs_init_done_off))
+        if pmic_target is not None:
+            self.log.warning("SHARED PMIC ANALYSIS: explicit target; unknown WACS requests remain pending")
+
+    def _strict_access(self, offset, size):
+        if getattr(self, "pmic_target", None) is not None and (type(size) is not int or size != 4
+                or type(offset) is not int or offset % 4):
+            raise ValueError("Strict WACS requires aligned 32-bit accesses")
 
     def hw_read(self, offset, size):
-        if offset >= 0xC00 and offset <= 0xC38:
+        if 0xC00 <= offset <= (0xC3f if getattr(self, "pmic_target", None) is not None else 0xC38):
+            self._strict_access(offset, size)
             offset = offset - 0xC00
             return self.wacs[offset // 0x10].read(offset % 0x10)
         return super().hw_read(offset, size)
 
     def hw_write(self, offset, size, value):
-        if offset >= 0xC00 and offset <= 0xC38:
+        if 0xC00 <= offset <= (0xC3f if getattr(self, "pmic_target", None) is not None else 0xC38):
+            self._strict_access(offset, size)
             offset = offset - 0xC00
             self.wacs[offset // 0x10].write(offset % 0x10, value)
             return True
         return super().hw_write(offset, size, value)
+
+    def enable_control_observer(self):
+        pass
+
+    def control_observation(self):
+        if getattr(self, "pmic_target", None) is None:
+            return {"kind": "legacy-pmic-wrapper", "unknown_reads_return_zero": True,
+                    "silicon_verified": False}
+        return {"kind": "shared-pmic-wrapper-analysis/v1", "target": self.pmic_target.facts(),
+                "channels": [channel.facts() for channel in self.wacs]}
+
+    def pre_snapshot_handler(self, snapshot_name):
+        if getattr(self, "pmic_target", None) is not None:
+            raise RuntimeError("Shared PMIC snapshots require identity-preserving machine serialization")

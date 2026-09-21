@@ -7,7 +7,8 @@ from .hwpor import HwporLayout, HwporSequencer
 
 
 class BSIImmediatePeripheral(PassthroughPeripheral):
-    def __init__(self, name, address, size, bsi_mode="observe", rf_profile=None, **kwargs):
+    def __init__(self, name, address, size, bsi_mode="observe", rf_profile=None,
+                 pmic_target=None, pmic_port=None, **kwargs):
         super().__init__(name, address, size, **kwargs)
         capture = bsi_mode == "capture-writes"
         software = bsi_mode == "software-rf"
@@ -23,6 +24,18 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
             targets.update({int(port): IdleLineMipiTarget(config)
                             for port, config in self.rf_profile.get("idle_mipi_ports", {}).items()})
             bus = SerialBus(targets)
+        self.pmic_target = pmic_target
+        if (pmic_target is None) != (pmic_port is None):
+            raise ValueError("Shared PMIC requires both target and explicit serial port")
+        if pmic_target is not None:
+            from .pmic_serial import PmicBsiWriteTarget
+            if (type(pmic_port) is not int or not 0 <= pmic_port < 16
+                    or bsi_mode == "observe" or bus is not None and pmic_port in bus.targets):
+                raise ValueError("Shared PMIC needs pending mode and an unoccupied port")
+            targets = {} if bus is None else dict(bus.targets)
+            targets[pmic_port] = PmicBsiWriteTarget(pmic_target)
+            bus = SerialBus(targets)
+            self.log.warning("SHARED PMIC ANALYSIS port %s: no BSI read/analog semantics", pmic_port)
         self.control = BsiImmediateControl(size=size, mode="pending" if capture or software else bsi_mode,
             read_layout=ReadCompletionLayout(0x1204, 0x1200, (0, 2)),
             serial_bus=bus)
@@ -69,6 +82,10 @@ class BSIImmediatePeripheral(PassthroughPeripheral):
             raise ValueError("Requires an unbound software-RF sequencer")
         clock.attach(self.hwpor)
         self.guest_clock = clock
+
+    def pre_snapshot_handler(self, snapshot_name):
+        if getattr(self, "pmic_target", None) is not None:
+            raise RuntimeError("Shared PMIC snapshots require identity-preserving machine serialization")
 
     def advance_guest_blocks(self, blocks):
         if self.guest_clock is not None:
