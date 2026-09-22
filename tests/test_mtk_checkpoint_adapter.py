@@ -107,6 +107,25 @@ class CheckpointAdapterTests(unittest.TestCase):
             self.assertEqual(execution["cpu_exceptions"]["first"][0]["preceding_unassigned_io"][-1]["physical_address"],0x160b0024)
             self.assertTrue(self.saved[-1]["ram_observer"]["unassigned_io"])
 
+    def test_ring_observer_requires_real_device_and_accepts_relocated_name(self):
+        from firmwire.vendor.mtk.hw.PCCIFPeripheral import SHM_CCIF_Periph
+        for real in (True, False):
+            with tempfile.TemporaryDirectory() as directory:
+                machine = self.make_machine(self.profile(directory, peripheral_controls=["OTHER_SHM"]))
+                device = object.__new__(SHM_CCIF_Periph) if real else SimpleNamespace()
+                device.enable_control_observer = Mock()
+                device.control_observation = lambda: {"read_only": True}
+                machine.peripheral_map["OTHER_SHM"] = device
+                if not real:
+                    with self.assertRaisesRegex(ValueError, "Unsupported control observer"):
+                        install(machine)
+                    continue
+                install(machine)
+                self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
+                device.enable_control_observer.assert_called_once()
+                self.assertEqual(self.saved[-1]["execution"]["peripheral_controls"]["OTHER_SHM"],
+                                 {"read_only": True})
+
     def test_pmic_observer_requires_selected_wrapper_and_identical_target(self):
         for name in ("SYNTHETIC_PMIC_A", "RELOCATED_WRAPPER_B"):
             with tempfile.TemporaryDirectory() as directory:

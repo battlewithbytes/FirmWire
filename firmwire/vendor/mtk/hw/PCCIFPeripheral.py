@@ -30,6 +30,24 @@ class FSDMode(Enum):
 
 
 class SHM_CCIF_Periph(PassthroughPeripheral):
+    def enable_control_observer(self):
+        from .ccci_ring_observer import RingObserver
+        if getattr(self, "ring_observer", None) is None:
+            rings = [(offset, "normal-%d" % index) for index, offset in enumerate(self.offsets)]
+            rings += [(offset, "exception-%d" % index) for index, offset in enumerate(self.exp_offsets)]
+            self.ring_observer = RingObserver(self, rings)
+
+    def control_observation(self):
+        return self.ring_observer.facts()
+
+    def hw_write(self, offset, size, value):
+        observer = getattr(self, "ring_observer", None)
+        before = observer.before_guest_write(offset, size) if observer else None
+        result = super().hw_write(offset, size, value)
+        if observer:
+            observer.after_guest_write(before, offset, size)
+        return result
+
     def __init__(self, name, address, size, fsd_mode=FSDMode.EMULATED, **kwargs):
         super().__init__(name, address, size, **kwargs)
 
@@ -242,6 +260,9 @@ class Ringbuf:
 
         # advance write pointer
         self.parent.write_raw(self.offset + 12 + 4, 4, write)
+        observer = getattr(self.parent, "ring_observer", None)
+        if observer is not None:
+            observer.queued(self.offset)
         # print("ringbuf write, write offset now %x" % write)
 
         return True
