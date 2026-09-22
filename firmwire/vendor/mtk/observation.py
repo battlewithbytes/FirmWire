@@ -1,6 +1,23 @@
 """Read-only, exact-image-bound RAM observation validation (no emulator imports)."""
 
 
+def _validate_ram_span(address, size, ranges_at):
+    for byte in range(address, address + size):
+        ranges = list(ranges_at(byte))
+        if len(ranges) != 1:
+            raise ValueError("RAM observer may not read holes or overlapping regions")
+        region = ranges[0]
+        data = region.data
+        permissions = getattr(data, "permissions", "")
+        if (region.begin > address or address + size > region.end or
+                getattr(data, "forwarded", True) or
+                getattr(data, "is_special", True) or
+                getattr(data, "is_symbolic", True) or
+                getattr(data, "emulate", None) is not None or
+                "r" not in permissions or "w" not in permissions):
+            raise ValueError("RAM observer may only read ordinary RAM, not MMIO/ROM")
+
+
 def validate_ram_observer(config, rom_sha256, ranges_at):
     """Reject anything not unambiguously ordinary readable/writable RAM.
 
@@ -17,20 +34,7 @@ def validate_ram_observer(config, rom_sha256, ranges_at):
     for address in words:
         if type(address) is not int or not 0 <= address <= 0xfffffffc or address % 4:
             raise ValueError("RAM observer requires aligned 32-bit integer addresses")
-        for byte in range(address, address + 4):
-            ranges = list(ranges_at(byte))
-            if len(ranges) != 1:
-                raise ValueError("RAM observer may not read holes or overlapping regions")
-            region = ranges[0]
-            data = region.data
-            permissions = getattr(data, "permissions", "")
-            if (region.begin > address or address + 4 > region.end or
-                    getattr(data, "forwarded", True) or
-                    getattr(data, "is_special", True) or
-                    getattr(data, "is_symbolic", True) or
-                    getattr(data, "emulate", None) is not None or
-                    "r" not in permissions or "w" not in permissions):
-                raise ValueError("RAM observer may only read ordinary RAM, not MMIO/ROM")
+        _validate_ram_span(address, 4, ranges_at)
     if len(set(words)) != len(words):
         raise ValueError("RAM observer contains duplicate words")
     return list(words)
@@ -73,6 +77,24 @@ class RamObservation:
 
     def __init__(self, config, rom_sha256, ranges_at, read_bytes):
         self.words = validate_ram_observer(config, rom_sha256, ranges_at)
+        windows = config.get("byte_windows", {})
+        if not isinstance(windows, dict) or len(windows) > 4:
+            raise ValueError("RAM observer permits at most four byte windows")
+        self.byte_windows = {}
+        for name, span in windows.items():
+            if (not isinstance(name, str) or not name.isidentifier() or len(name) > 64
+                    or not isinstance(span, dict) or set(span) != {"address", "size"}):
+                raise ValueError("RAM byte windows require named address/size pairs")
+            address, size = span["address"], span["size"]
+            if (type(address) is not int or type(size) is not int or address < 0
+                    or not 4 <= size <= 256 or address % 4 or size % 4
+                    or address + size > 2**32):
+                raise ValueError("RAM byte windows require aligned bounded 32-bit spans")
+            _validate_ram_span(address, size, ranges_at)
+            for previous in self.byte_windows.values():
+                if address < previous["address"] + previous["size"] and address + size > previous["address"]:
+                    raise ValueError("RAM byte windows may not overlap")
+            self.byte_windows[name] = dict(span)
         self._read_bytes = read_bytes
 
     def sample(self, completed_blocks):
@@ -82,4 +104,13 @@ class RamObservation:
             if len(value) != 4:
                 raise ValueError("RAM observer received a short word read")
             words[hex(address)] = int.from_bytes(value, "little")
-        return {"completed_blocks": completed_blocks, "words": words}
+        snapshot = {"completed_blocks": completed_blocks, "words": words}
+        if self.byte_windows:
+            windows = {}
+            for name, span in self.byte_windows.items():
+                data = self._read_bytes(span["address"], span["size"])
+                if len(data) != span["size"]:
+                    raise ValueError("RAM observer received a short byte-window read")
+                windows[name] = dict(span, hex=bytes(data).hex())
+            snapshot["byte_windows"] = windows
+        return snapshot

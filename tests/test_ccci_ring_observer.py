@@ -5,6 +5,24 @@ from firmwire.vendor.mtk.hw.PCCIFPeripheral import SHM_CCIF_Periph, Ringbuf
 
 
 class RingObserverTests(unittest.TestCase):
+    def test_reply_poll_counts_exclude_observer_reads_and_payload(self):
+        device = self.device()
+        self.assertIsNone(device.control_observation()["rings"][0]["reply_control_reads_since_last_queue"])
+        self.assertEqual(device.hw_read(16, 4), 0)
+        Ringbuf(device, 0).writePacket(bytes(16))
+        self.assertEqual(device.hw_read(16, 4), 32)
+        device.hw_read(12, 4)
+        device.hw_read(24, 4)  # not reply control
+        device.hw_read(280 + 16, 4)  # another queue
+        for _ in range(3): device.control_observation()
+        facts = device.control_observation()["rings"]
+        self.assertEqual(facts[0]["guest_reply_control_reads"], 3)
+        self.assertEqual(facts[0]["reply_control_reads_since_last_queue"], 2)
+        self.assertEqual(facts[1]["guest_reply_control_reads"], 1)
+        self.assertIsNone(facts[1]["reply_control_reads_since_last_queue"])
+        Ringbuf(device, 0).writePacket(bytes(16))
+        self.assertEqual(device.control_observation()["rings"][0]["reply_control_reads_since_last_queue"], 0)
+
     def device(self, enabled=True):
         device = object.__new__(SHM_CCIF_Periph)
         device.mem = bytearray(560)

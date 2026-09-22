@@ -8,6 +8,15 @@ class RingObserver:
         self.events = []
         self.queued_frames = {offset: 0 for offset in self.rings}
         self.guest_read_writes = {offset: 0 for offset in self.rings}
+        self.control_reads = {offset: 0 for offset in self.rings}
+        self.reads_at_last_queue = {offset: None for offset in self.rings}
+
+    def guest_read(self, address, size):
+        # Count guest reads of reply control only, never observer read_raw calls
+        # or payload reads. A control read is not proof of message handling.
+        for offset in self.rings:
+            if address < offset + 24 and address + size > offset + 12:
+                self.control_reads[offset] += 1
 
     def state(self, offset):
         if offset < 0 or offset + 24 > len(self.parent.mem):
@@ -49,6 +58,7 @@ class RingObserver:
     def queued(self, offset):
         if offset in self.rings:
             self.queued_frames[offset] += 1
+            self.reads_at_last_queue[offset] = self.control_reads[offset]
             self.record({"kind": "emulator-frame-queued", "offset": offset,
                          "state": self.state(offset)})
 
@@ -58,6 +68,10 @@ class RingObserver:
                 "cursor_semantics": "modulo positions; reset/full cycles cannot be distinguished",
                 "rings": [dict(self.state(offset), offset=offset, label=label,
                                queued_frames=self.queued_frames[offset],
-                               guest_read_writes=self.guest_read_writes[offset])
+                               guest_read_writes=self.guest_read_writes[offset],
+                               guest_reply_control_reads=self.control_reads[offset],
+                               reply_control_reads_since_last_queue=(
+                                   None if self.reads_at_last_queue[offset] is None else
+                                   self.control_reads[offset] - self.reads_at_last_queue[offset]))
                           for offset, label in self.rings.items()],
                 "recent_events": list(self.events)}

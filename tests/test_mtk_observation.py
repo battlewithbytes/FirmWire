@@ -54,6 +54,45 @@ class RamObserverTests(unittest.TestCase):
     def test_ram_boundaries(self):
         self.assertEqual(self.check(), self.config["words"])
 
+    def test_byte_windows_read_exact_physical_spans_and_preserve_input(self):
+        config = dict(self.config, byte_windows={"runtime": {"address": 0x1100, "size": 256}})
+        reader = Mock(side_effect=lambda address, size: bytes(range(size)))
+        sampler = module.RamObservation(config, "a" * 64, lambda _: [region()], reader)
+        config["byte_windows"]["runtime"]["address"] = 0
+        result = sampler.sample(17)
+        self.assertEqual(result["byte_windows"]["runtime"],
+                         {"address": 0x1100, "size": 256, "hex": bytes(range(256)).hex()})
+        self.assertEqual(reader.call_args.args, (0x1100, 256))
+        reader.side_effect = lambda address, size: bytes(4)
+        with self.assertRaisesRegex(ValueError, "short byte-window"):
+            sampler.sample(18)
+
+    def test_bad_byte_windows_fail_before_any_read(self):
+        cases = [None, [], {"a": {}}, {"bad label": {"address": 0x1100, "size": 4}},
+                 {str(i): {"address": 0x1100 + 4*i, "size": 4} for i in range(5)},
+                 {"a": {"address": 0x1100, "size": 8}, "b": {"address": 0x1104, "size": 4}}]
+        cases += [{"a": {"address": address, "size": size}} for address, size in
+                  ((True, 4), (0x1100, True), (-4, 4), (0x1101, 4), (0x1100, 0),
+                   (0x1100, 257), (0x1100, 6), (0xfffffffc, 8), (0x1ffc, 8))]
+        reader = Mock()
+        for windows in cases:
+            with self.subTest(windows=windows), self.assertRaises(ValueError):
+                module.RamObservation(dict(self.config, byte_windows=windows), "a"*64,
+                                      lambda _: [region()], reader)
+        reader.assert_not_called()
+
+    def test_window_rejects_mmio_hole_and_single_byte_overlap(self):
+        reader = Mock()
+        config = dict(self.config, byte_windows={"a": {"address": 0x1100, "size": 64}})
+        for ranges in ([region(), region(begin=0x1121, end=0x1122, forwarded=True)],
+                       [region(end=0x1120), region(begin=0x1124)],
+                       [region(end=0x1100), region(begin=0x1100, end=0x1140, permissions="rx"),
+                        region(begin=0x1140)]):
+            with self.assertRaises(ValueError):
+                module.RamObservation(config, "a"*64,
+                    lambda address: [r for r in ranges if r.begin <= address < r.end], reader)
+        reader.assert_not_called()
+
     def test_sampler_is_relocatable_and_image_bound(self):
         # Unrelated synthetic images/layouts; no Lagos or vendor source data.
         for identity, base in (("a" * 64, 0x1000), ("b" * 64, 0x7000)):

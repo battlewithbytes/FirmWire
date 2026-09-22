@@ -40,6 +40,13 @@ class SHM_CCIF_Periph(PassthroughPeripheral):
     def control_observation(self):
         return self.ring_observer.facts()
 
+    def hw_read(self, offset, size):
+        value = super().hw_read(offset, size)
+        observer = getattr(self, "ring_observer", None)
+        if observer:
+            observer.guest_read(offset, size)
+        return value
+
     def hw_write(self, offset, size, value):
         observer = getattr(self, "ring_observer", None)
         before = observer.before_guest_write(offset, size) if observer else None

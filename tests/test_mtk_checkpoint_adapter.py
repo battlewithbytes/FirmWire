@@ -79,6 +79,23 @@ class CheckpointAdapterTests(unittest.TestCase):
         self.assertNotIn("exception", self.callbacks)
         self.assertNotIn("io_read", self.callbacks)
 
+    def test_byte_only_changes_are_persisted_without_changing_word_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = self.make_machine(self.profile(directory,
+                byte_windows={"code": {"address": 0x1100, "size": 8}}))
+            state = [0]
+            self.reader.side_effect = lambda address, size: bytes([state[0] if address == 0x1100 else 1])*size
+            install(machine)
+            callback = self.callbacks["block"]
+            callback("cpu", SimpleNamespace(pc=0x2000), 0)
+            state[0] = 7
+            machine.loader.capability_report["execution"]["completed_blocks"] = 9
+            callback("cpu", SimpleNamespace(pc=0x2000), 0)
+            execution = self.saved[-1]["execution"]
+            self.assertEqual(execution["observed_ram_bytes"]["code"]["hex"], "07"*8)
+            self.assertEqual(len(execution["ram_changes"]), 2)
+            self.assertEqual(execution["ram_changes"][0]["words"], execution["ram_changes"][1]["words"])
+
     def test_idc_control_observer_is_explicit_available_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
             machine = self.make_machine(self.profile(directory,peripheral_controls=["IDC_CTRL"]))

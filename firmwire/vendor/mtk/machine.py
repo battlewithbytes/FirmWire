@@ -758,8 +758,11 @@ class MT6878Machine(FirmWireEmu):
             snapshot = ram_sampler.sample(execution["completed_blocks"])
             execution["observed_ram"] = snapshot["words"]
             execution["observed_ram_at_block"] = snapshot["completed_blocks"]
+            if "byte_windows" in snapshot:
+                execution["observed_ram_bytes"] = snapshot["byte_windows"]
             history = execution.setdefault("ram_changes", [])
-            if not history or history[-1]["words"] != snapshot["words"]:
+            if (not history or history[-1]["words"] != snapshot["words"]
+                    or history[-1].get("byte_windows") != snapshot.get("byte_windows")):
                 history.append(snapshot)
                 del history[:-16]
 
