@@ -1,6 +1,18 @@
 """Read-only, exact-image-bound RAM observation validation (no emulator imports)."""
 
 
+def normal_tb_exit(exit_code):
+    """PANDA/QEMU TB exits 2/3 report attempts that never executed.
+
+    The block callback disables TB chaining in pandare. With that contract,
+    only exit-via-index 0/1 supports a completed block/entry-marker observation.
+    See cpu-exec.c:226-249 and tcg/tcg.h TB_EXIT_* in the pinned engine.
+    """
+    if type(exit_code) is not int or exit_code not in (0, 1, 2, 3):
+        raise ValueError("unknown translation-block exit code")
+    return exit_code <= 1
+
+
 def _validate_ram_span(address, size, ranges_at):
     for byte in range(address, address + size):
         ranges = list(ranges_at(byte))

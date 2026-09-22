@@ -32,12 +32,29 @@ method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDe
 namespace = {"json": json, "log": Mock(), "__package__": "firmwire.vendor.mtk",
     "bind_rf_clock": load("hw/guest_clock").bind_rf_clock,
     **{name: getattr(observation, name) for name in
-       ("RamObservation", "validate_pc_markers", "record_pc_marker")}}
+       ("RamObservation", "validate_pc_markers", "record_pc_marker", "normal_tb_exit")}}
 exec(compile(ast.Module(body=[method], type_ignores=[]), "machine.py", "exec"), namespace)
 install = namespace["_install_execution_evidence"]
 
 
 class CheckpointAdapterTests(unittest.TestCase):
+    def test_nonexecuted_tb_exits_do_not_count_or_sample_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = self.make_machine(self.profile(directory))
+            install(machine)
+            callback = self.callbacks["block"]
+            before = self.reader.call_count
+            for code in (2, 3, 3):
+                callback("cpu", SimpleNamespace(pc=0x2000), code)
+            execution = machine.loader.capability_report["execution"]
+            self.assertEqual(execution["completed_blocks"], 0)
+            self.assertEqual(execution["per_context"], {})
+            self.assertEqual(execution["early_exit_callbacks"], {"2":1,"3":2})
+            self.assertEqual(self.reader.call_count, before)
+            for code in (0, 1): callback("cpu", SimpleNamespace(pc=0x2000), code)
+            self.assertEqual(execution["completed_blocks"], 2)
+            self.assertEqual(execution["per_context"]["context-0"]["pc_markers"]["entry"]["hits"],2)
+
     def make_machine(self, profile=None):
         self.saved = []
         self.callbacks = {}

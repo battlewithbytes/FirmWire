@@ -20,6 +20,14 @@ def region(begin=0x1000, end=0x2000, **kwargs):
 
 
 class RamObserverTests(unittest.TestCase):
+    def test_tb_exit_policy_rejects_early_exits_and_unknown_codes(self):
+        self.assertTrue(module.normal_tb_exit(0))
+        self.assertTrue(module.normal_tb_exit(1))
+        self.assertFalse(module.normal_tb_exit(2))
+        self.assertFalse(module.normal_tb_exit(3))
+        for code in (True, -1, 4, None, "0"):
+            with self.assertRaises(ValueError): module.normal_tb_exit(code)
+
     def test_pc_markers_default_off_and_exact_lookup(self):
         self.assertEqual(module.validate_pc_markers({}), {})
         self.assertEqual(module.validate_pc_markers({"pc_markers": {"entry": 0x1234}}),

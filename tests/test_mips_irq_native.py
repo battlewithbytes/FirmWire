@@ -17,6 +17,7 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
     from keystone import Ks, KS_ARCH_MIPS, KS_MODE_MIPS32, KS_MODE_LITTLE_ENDIAN
     from firmwire.hw.uart import UARTCore, UARTRegisterBank
     from firmwire.emulator.mips_irq import MipsIRQInput
+    from firmwire.vendor.mtk.observation import normal_tb_exit
     root = Path(directory)
     # The inherited MTK map is not standard kseg translation. Keep synthetic
     # physical mappings explicit for each CPU model, just as a board must.
@@ -154,6 +155,7 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
         return index
     injected = False
     blocks = 0
+    early_exits = 0
     recent = []
     @panda.cb_before_block_exec
     def before(cpu,tb):
@@ -161,7 +163,10 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
             print("before",hex(int(panda.libpanda.panda_current_pc(cpu))),flush=True)
     @panda.cb_after_block_exec
     def observe(cpu,tb,exit_code):
-        nonlocal injected, blocks
+        nonlocal injected, blocks, early_exits
+        if not normal_tb_exit(int(exit_code)):
+            early_exits += 1
+            return
         blocks += 1
         recent.append(int(panda.libpanda.panda_current_pc(cpu)))
         del recent[:-16]
@@ -177,7 +182,8 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
         if word(0x1104) and not (root/"result.json").exists():
             rejects = [endpoint._set_irq(*args) for args in ((-1,5,1),(999,5,1),(0,1,1),(0,8,1),(0,5,2))]
             report = dict(words=[word(0x1000+i*4) for i in range(4)],levels=levels,
-                          exceptions=exceptions,rejects=rejects,rx_remaining=len(core.rx))
+                          exceptions=exceptions,rejects=rejects,rx_remaining=len(core.rx),
+                          normal_exit_blocks=blocks, early_exit_callbacks=early_exits)
             if routed:
                 report.update(controller=controller.snapshot(), claimed_source=word(0x1010))
             if mdcirq:
@@ -236,6 +242,8 @@ class MipsIRQNativeTests(unittest.TestCase):
             debug = Path(directory)/"debug.json"
             self.assertTrue(result.exists(),log.read()[-2000:] + (debug.read_text() if debug.exists() else ""))
             report = json.loads(result.read_text())
+            self.assertGreater(report["normal_exit_blocks"],0)
+            self.assertGreaterEqual(report["early_exit_callbacks"],0)
             before, handler, byte, after = report["words"]
             self.assertTrue(before & 0x2000)
             self.assertTrue(handler & 0x2000)

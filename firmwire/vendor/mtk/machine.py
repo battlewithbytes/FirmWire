@@ -22,7 +22,7 @@ from firmwire.vendor.mtk.hooks import (
     NU_Set_Events_hook,
 )
 from firmwire.vendor.mtk.mtk_task import MtkTask, TASK_STRUCT_SIZE
-from firmwire.vendor.mtk.observation import RamObservation, validate_pc_markers, record_pc_marker
+from firmwire.vendor.mtk.observation import RamObservation, validate_pc_markers, record_pc_marker, normal_tb_exit
 from firmwire.vendor.mtk.hw.guest_clock import bind_rf_clock
 
 from firmwire.util.port import find_free_port
@@ -740,6 +740,7 @@ class MT6878Machine(FirmWireEmu):
         """Bounded PC evidence and opt-in RAM samples, not a task/handshake claim."""
         report = self.loader.capability_report
         report["execution"] = {"completed_blocks": 0, "sampled_pcs": [], "per_context": {},
+                               "block_count_semantics": "normal-tb-exit/v1", "early_exit_callbacks": {},
                                "context_identity": "opaque callback CPU pointer, not guest CPU id"}
         context_labels = {}
         seen = set()
@@ -849,6 +850,11 @@ class MT6878Machine(FirmWireEmu):
         @self.panda.cb_after_block_exec
         def cockpit_after_block(cpu, tb, exit_code):
             execution = report["execution"]
+            if not normal_tb_exit(int(exit_code)):
+                skipped = execution["early_exit_callbacks"]
+                key = str(int(exit_code))
+                skipped[key] = skipped.get(key, 0) + 1
+                return
             execution["completed_blocks"] += 1
             count = execution["completed_blocks"]
             pc = int(tb.pc)
