@@ -39,15 +39,33 @@ class MDCIRQ_Periph(PassthroughPeripheral):
             self.register_observer = RegisterAccessObserver(len(self.mem))
 
     def control_observation(self):
-        return self.register_observer.snapshot()
+        facts = self.register_observer.snapshot()
+        if hasattr(self, "irq_delivery"):
+            facts["irq_delivery"] = self.irq_delivery.snapshot()
+        if hasattr(self, "irq_output_handoff"):
+            facts["irq_output_handoff"] = self.irq_output_handoff.snapshot()
+        return facts
+
+    def enable_irq_delivery(self, outputs, sources, *, minimum_inclusive):
+        from .mdcirq_delivery import MdcirqLevelDelivery
+        if hasattr(self, "irq_delivery"):
+            raise ValueError("IRQ controller already connected")
+        self.irq_delivery = MdcirqLevelDelivery(outputs, sources, minimum_inclusive=minimum_inclusive)
 
     def hw_read(self, offset, size):
-        value = super().hw_read(offset, size)
+        delivery = getattr(self, "irq_delivery", None)
+        value = delivery.read(offset, size) if delivery is not None else None
+        if value is None: value = super().hw_read(offset, size)
         if hasattr(self, "register_observer"):
             self.register_observer.record("read", offset, size, value)
         return value
 
     def hw_write(self, offset, size, value):
+        delivery = getattr(self, "irq_delivery", None)
+        if delivery is not None and delivery.write(offset, size, value):
+            if hasattr(self, "register_observer"):
+                self.register_observer.record("write", offset, size, value)
+            return True
         if offset >= 0 and offset <= 0x20:
             pass  # int status
         elif offset >= 0x20 and offset < 0x40:

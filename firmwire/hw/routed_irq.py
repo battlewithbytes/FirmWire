@@ -50,6 +50,23 @@ class RoutedLevelIRQController:
         self.routes[source] = frozenset(targets)
         self._update()
 
+    def configure_many(self, updates):
+        """Atomically update a packed bank without transient output edges."""
+        checked = []
+        seen = set()
+        for source, priority, targets in updates:
+            self._source(source)
+            if source in seen or type(priority) is not int or not 0 <= priority < self.priority_levels:
+                raise ValueError("invalid/duplicate batch source or priority")
+            targets = tuple(targets)
+            for output in targets: self._output(output)
+            if len(set(targets)) != len(targets): raise ValueError("duplicate interrupt output")
+            checked.append((source, priority, frozenset(targets)))
+            seen.add(source)
+        for source, priority, targets in checked:
+            self.priority[source], self.routes[source] = priority, targets
+        self._update()
+
     def set_level(self, source, level):
         self._source(source)
         if type(level) is not bool:

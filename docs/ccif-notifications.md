@@ -21,7 +21,7 @@ The opt-in MTK loader option is:
 Default is `disabled`. This analysis ABI requires native mode and exactly one
 PCCIF ring transport (`pccifid=0`). It uses ring index as the channel bit in
 RCHNUM (`+0x10`); ACK (`+0x14`) clears selected bits. The existing SRAM/AMMS
-notification remains independent. No CPU IRQ is connected, no guest firmware
+notification remains independent. This option alone connects no CPU IRQ; no guest firmware
 is patched, and no application or AP-peer delivery is claimed. Unknown ABIs,
 ambiguous transports and rehosted selection are rejected before mapping.
 
@@ -36,9 +36,13 @@ this option.
 
 PCCIF's optional `enable_control_observer()` records only completed accesses
 below `+0x100`, excluding SRAM payloads. Its snapshot includes bounded channel
-counters and explicitly false CPU-interrupt/application-delivery flags.
+counters, actual CPU connection state and a separate false application-delivery flag.
 
-## Normal IRQ adapter: tested but not installed in a modem
+## Normal IRQ adapter and explicit connection
+
+The default remains unconnected. An explicit experimental connection is now
+available as described below; the register adapter is still not a complete
+MediaTek interrupt controller.
 
 `firmwire.vendor.mtk.hw.mdcirq.MdcirqNormalIRQBank` adapts a reviewed subset of
 the normal MDCIRQ page onto `RoutedLevelIRQController`. Construction requires
@@ -63,11 +67,75 @@ unsupported; this is not a drop-in replacement for the full controller.
 tests on both `24Kc` and `cockpit-mtk-legacy`. This proves the implemented
 synthetic contract and native CPU line path, not a firmware IRQ mapping.
 
-The actual modem continues to use passthrough MDCIRQ. The finalized Lagos LISR
+By default the modem uses passthrough MDCIRQ. The finalized Lagos LISR
 captures independently confirm IDs 76/77 as `pccif0irq0`/`pccif0irq1` in both
 baseline and notification runs. An earlier interpretation that they remained
 at the fatal default handler was incorrect for the completed runs. Registration
 does not establish source eligibility: the observed packed priority for 76..79
-remains `0x7f7f7f7f`. Confirm masks, threshold equality and output routing before
-connecting doorbell -> controller -> CPU. Notification, ACK and queue-consumer
-progress must be measured independently.
+remains `0x7f7f7f7f`. The selected-source experiment below makes its reviewed
+threshold policy and output routing explicit. Notification, ACK and
+queue-consumer progress must be measured independently.
+
+## Opt-in selected-source delivery
+
+`--mtk-loader-ccif_irq_profile PATH` selects a strictly validated
+`firmwire.ccif-normal-irq-analysis/v1` JSON profile. It requires native mode,
+realized explicit CPU topology, enabled ring notifications, matching ROM/CPU
+identity, named typed controller/transport devices, disjoint channel masks and
+explicit source/output wiring. It is never auto-enabled for unknown firmware.
+
+The profile contains `schema`, `rom_sha256`, `cpu_model`, nonempty `evidence`,
+`controller`, `transport`, explicit boolean `minimum_inclusive`, `outputs`
+(`cpu_index`, `pin`), and `routes` (`channel_mask`, `source`). Outputs must match
+the realized CPU count without duplicates; legacy bank overlap validation
+still rejects unsupported geometry. No source number, CPU count, firmware PC
+or image name is embedded in the generic devices.
+
+`ChannelIRQRouter` maps disjoint channel masks to persistent levels. The new
+`MdcirqLevelDelivery` connects only selected external normal, dynamic, level
+inputs; selected edge/broadcast/NMI/software-trigger modes fail explicitly.
+Guest mask aliases, priorities, groups, routes and claim/previous-ID return
+control delivery. Selected sources start masked; no forced unmask or register
+patches are applied. The idle current-priority read includes bit 7 (minimum
+priority discriminator); active IRQ priority does not.
+
+Shared priority/group words preserve **all original bytes for readback**.
+Unselected fields (including NMI-only groups 16/17) are stored, not interpreted
+by the normal-IRQ core. All unselected interrupt inputs remain unmodeled, and
+other registers retain existing passthrough behavior. Capability facts state
+these limits explicitly. This subset is not NMI/GCR/edge/broadcast/timer emulation.
+
+Avatar may invoke an MMIO device on its dispatch thread. `DeferredIRQOutputs`
+therefore transfers desired levels to a PANDA after-block callback: only that
+emulator-thread callback calls `MipsIRQInput`. Unit tests verify thread ownership;
+native tests cover notify -> claim -> ACK -> previous-ID return -> ERET on both
+MIPS models through the deferred path. Pulses are not this handoff's contract.
+
+The reusable controller's `configure_many` validates a whole update before
+publishing it. Packed priority/group changes and route changes produce no
+intermediate native line edges and no quadratic per-source recomputation.
+
+The initial Lagos profile selects **only source 76** for normal channel bits.
+Target Ghidra shows its handler masks the source and activates worker `0x7c`.
+Source 77 is a different, broadcast group and handles high event bits; it is
+not connected. The actual packed group word is `0x04040504`, meaning group 4
+for source 76 and group 5 for 77, not group 4 for both. Idle equality is supported
+by the sibling driver's explicit comparison (not a claim of silicon fidelity).
+
+Snapshot `irq_delivery` separates asserted input, guest mask, priority, group,
+route, claims, returns and active stacks. `irq_output_handoff` shows desired and
+driven CPU levels. Connection/configuration facts stay separate from successful
+guest service, task progress, real AP communication and full boot.
+
+The unchanged Lagos 900-second connected experiment completes 96 source-76
+claims and previous-ID returns with 192 CPU-line transitions. Its previously
+pending SWTP/filesystem reply queues drain. Other sources remain unmodeled;
+full boot and AP communication remain unverified. Firmware configuration is
+not forced to unmask the source. Synthetic and native regressions pass:
+394 tests, three skipped in the full selected suite.
+
+PANDA's MIPS hardware interrupt path bypasses `before_handle_exception`;
+empty callback counts are not evidence of absent IRQs. Validate claims/returns,
+line changes and queues independently. The after-block level handoff also does
+not prove externally initiated wakeup when all CPUs are halted; a future real
+AP bridge needs a tested emulator-thread wakeup mechanism for that case.

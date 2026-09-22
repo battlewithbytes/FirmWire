@@ -91,6 +91,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "ccif_irq_profile": {
+            "type": PurePath, "default": None,
+            "help": "OPT-IN ROM-bound normal CCIF IRQ wiring; native analysis with explicit CPU topology only",
+        },
         "ccif_notifications": {
             "type": str, "choices": ["disabled", "ring-index-channel-bit-analysis"], "default": "disabled",
             "help": "OPT-IN ring reply channel bits in RCHNUM, cleared by ACK; no CPU interrupt injection",
@@ -516,6 +520,10 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_memory_map(self):
+        if self.loader_args.get("ccif_irq_profile") is not None:
+            if (self.boot_mode != "native" or self.loader_args.get("cpu_topology") is None
+                    or self.loader_args.get("ccif_notifications") != "ring-index-channel-bit-analysis"):
+                raise ValueError("IRQ profile requires native topology and explicit ring notifications")
         notifications = self.loader_args.get("ccif_notifications", "disabled")
         if notifications not in ("disabled", "ring-index-channel-bit-analysis"):
             raise ValueError("Unsupported CCIF reply notification ABI")

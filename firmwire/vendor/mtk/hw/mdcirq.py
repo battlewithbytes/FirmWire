@@ -69,13 +69,15 @@ class MdcirqNormalIRQBank:
                 self.outputs[index](level)
                 self.driven[index] = level
 
-    def _sync_routes(self):
+    def _sync_routes(self, sources=None):
         # Internal callbacks accumulate final levels. A packed register update
         # never publishes intermediate per-source route changes to the CPU.
-        for source in range(self.sources):
+        updates = []
+        for source in range(self.sources) if sources is None else sources:
             mask = self.routes[self.groups[source]]
-            self.core.configure(source, priority=self.priorities[source],
-                targets=[vpe for vpe in range(self.vpes) if not mask & (1 << vpe)])
+            updates.append((source, self.priorities[source],
+                [vpe for vpe in range(self.vpes) if not mask & (1 << vpe)]))
+        self.core.configure_many(updates)
 
     def set_level(self, source, level):
         self.core.set_level(source, level)
@@ -101,7 +103,7 @@ class MdcirqNormalIRQBank:
         if name == "current_id":
             return self.core.active[index][-1][0] if self.core.active[index] else 0x1ff
         if name == "current_priority":
-            return self.core.active[index][-1][1] if self.core.active[index] else 127
+            return self.core.active[index][-1][1] if self.core.active[index] else self.minimum[index] | 0x80
         raise NotImplementedError("unimplemented MDCIRQ read: " + name)
 
     def write(self, offset, value, size=4):
@@ -119,12 +121,12 @@ class MdcirqNormalIRQBank:
             if any(byte >= (128 if name == "priority" else 16) for byte in decoded):
                 raise NotImplementedError("unsupported priority/group encoding")
             values[index*4:index*4+len(decoded)] = decoded
-            self._sync_routes()
+            self._sync_routes(range(index*4, index*4+len(decoded)))
         elif name == "route":
             if value >> self.vpes:
                 raise ValueError("route mask exceeds configured outputs")
             self.routes[index] = value
-            self._sync_routes()
+            self._sync_routes(source for source in range(self.sources) if self.groups[source] == index)
         elif name in ("minimum", "state"):
             if value > (127 if name == "minimum" else 511):
                 raise ValueError("invalid priority/state value")

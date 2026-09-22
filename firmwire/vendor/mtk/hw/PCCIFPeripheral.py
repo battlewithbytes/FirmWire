@@ -490,7 +490,9 @@ class PCCIF_Periph(PassthroughPeripheral):
         doorbell = getattr(self, "reply_doorbell", None)
         if doorbell is not None:
             facts["reply_notifications"] = dict(doorbell.snapshot(), analysis_only=True,
-                cpu_interrupt_connected=False, application_delivery_verified=False)
+                cpu_interrupt_connected=hasattr(self, "reply_irq_router"), application_delivery_verified=False)
+        if hasattr(self, "reply_irq_router"):
+            facts["reply_irq_router"] = self.reply_irq_router.snapshot()
         return facts
 
     # 0 CON, 4 BUSY, C TCHNUM, 14 ACK, 100 CHDATA

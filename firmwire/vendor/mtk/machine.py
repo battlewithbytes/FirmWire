@@ -330,6 +330,9 @@ class MT6878Machine(FirmWireEmu):
                     raise ValueError("Synthetic SEJ requested but AES_TOP0 is unavailable")
                 peripheral.enable_analysis(analysis_key)
                 self.loader.capability_report["security_domain"] = peripheral.analysis_facts()
+            if loader.loader_args.get("ccif_irq_profile") is not None:
+                from .ccif_irq_profile import bind_profile
+                bind_profile(self, loader.loader_args["ccif_irq_profile"])
             self._install_execution_evidence()
             self.panda.athread.warned = True
             return True
