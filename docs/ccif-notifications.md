@@ -63,9 +63,11 @@ unsupported; this is not a drop-in replacement for the full controller.
 tests on both `24Kc` and `cockpit-mtk-legacy`. This proves the implemented
 synthetic contract and native CPU line path, not a firmware IRQ mapping.
 
-The actual modem continues to use passthrough MDCIRQ. A captured Lagos LISR
-table leaves the older sibling source's candidate CCIF IDs 76/77 pointing at
-the fatal default handler. They must not be wired based on the old header.
-Establish the target's registration, source eligibility and output route before
+The actual modem continues to use passthrough MDCIRQ. The finalized Lagos LISR
+captures independently confirm IDs 76/77 as `pccif0irq0`/`pccif0irq1` in both
+baseline and notification runs. An earlier interpretation that they remained
+at the fatal default handler was incorrect for the completed runs. Registration
+does not establish source eligibility: the observed packed priority for 76..79
+remains `0x7f7f7f7f`. Confirm masks, threshold equality and output routing before
 connecting doorbell -> controller -> CPU. Notification, ACK and queue-consumer
 progress must be measured independently.
