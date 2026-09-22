@@ -183,9 +183,12 @@ CCIF_PKG_FOOTER = 0xCCDDEEFF
 
 class Ringbuf:
     # offset points to ccci_ringbuf
-    def __init__(self, parent, offset):
+    def __init__(self, parent, offset, on_reply=None):
+        if on_reply is not None and not callable(on_reply):
+            raise ValueError("reply notification must be callable")
         self.parent = parent
         self.offset = offset
+        self.on_reply = on_reply
 
     def rx_state(self):
         read = self.parent.read_raw(self.offset + 0, 4)
@@ -270,6 +273,8 @@ class Ringbuf:
         observer = getattr(self.parent, "ring_observer", None)
         if observer is not None:
             observer.queued(self.offset)
+        if self.on_reply is not None:
+            self.on_reply()
         # print("ringbuf write, write offset now %x" % write)
 
         return True
@@ -443,13 +448,21 @@ CCCI_RPC_TX = 33
 
 
 class PCCIF_Periph(PassthroughPeripheral):
-    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, ipc_dispatcher=None, closed_ports=None, mailbox_dispatcher=None, **kwargs):
+    def __init__(self, name, address, size, pccifid, ringbuffer, ap_properties=None, ipc_dispatcher=None, closed_ports=None, mailbox_dispatcher=None, reply_notifications="disabled", **kwargs):
+        if reply_notifications not in ("disabled", "ring-index-channel-bit-analysis"):
+            raise ValueError("Unsupported CCIF reply notification ABI")
+        if reply_notifications != "disabled" and pccifid != 0:
+            raise ValueError("Reply notifications require the selected ring transport")
         super().__init__(name, address, size, **kwargs)
 
         self.pccifid = pccifid
         self.pccif_version = kwargs.get("version", 1)
         self.rchnum = 0
         self.ringbuffer = ringbuffer.resolve()
+        self.reply_doorbell = None
+        if reply_notifications != "disabled":
+            from firmwire.hw.channel_doorbell import ChannelDoorbell
+            self.reply_doorbell = ChannelDoorbell(len(self.ringbuffer.offsets))
         if ap_properties is not None and not isinstance(ap_properties, APSystemProperties):
             raise ValueError("ap_properties must be an APSystemProperties instance")
         self.ap_properties = ap_properties if ap_properties is not None else APSystemProperties()
@@ -466,8 +479,28 @@ class PCCIF_Periph(PassthroughPeripheral):
             mailbox_dispatcher.validate_channels(closed_ports.channels if closed_ports else ())
         self.mailbox_dispatcher = mailbox_dispatcher
 
+    def enable_control_observer(self):
+        from firmwire.hw.register_observer import RegisterAccessObserver
+        if not hasattr(self, "register_observer"):
+            # Control registers only: do not retain SRAM message payloads.
+            self.register_observer = RegisterAccessObserver(0x100)
+
+    def control_observation(self):
+        facts = self.register_observer.snapshot()
+        doorbell = getattr(self, "reply_doorbell", None)
+        if doorbell is not None:
+            facts["reply_notifications"] = dict(doorbell.snapshot(), analysis_only=True,
+                cpu_interrupt_connected=False, application_delivery_verified=False)
+        return facts
+
     # 0 CON, 4 BUSY, C TCHNUM, 14 ACK, 100 CHDATA
     def hw_read(self, offset, size):
+        value = self._read_register(offset, size)
+        if hasattr(self, "register_observer") and 0 <= offset < 0x100:
+            self.register_observer.record("read", offset, size, value)
+        return value
+
+    def _read_register(self, offset, size):
         if offset == 0x0:
             # CON
             # (only used by pccif1 to OR on a bit?)
@@ -478,8 +511,10 @@ class PCCIF_Periph(PassthroughPeripheral):
         elif offset == 0x10:
             # RCHNUM
             # one bit per channel
-            self.log.debug(f"RCHNUM {self.rchnum:x}")
-            return self.rchnum
+            doorbell = getattr(self, "reply_doorbell", None)
+            pending = self.rchnum | (doorbell.pending if doorbell is not None else 0)
+            self.log.debug(f"RCHNUM {pending:x}")
+            return pending
         elif offset >= 0x100 and offset < 0x100 + 0x200:
             # this is SRAM
             return super().hw_read(offset, size)
@@ -488,6 +523,12 @@ class PCCIF_Periph(PassthroughPeripheral):
             assert False
 
     def hw_write(self, offset, size, value):
+        result = self._write_register(offset, size, value)
+        if hasattr(self, "register_observer") and 0 <= offset < 0x100:
+            self.register_observer.record("write", offset, size, value)
+        return result
+
+    def _write_register(self, offset, size, value):
         if offset == 0x0:
             # CON
             # (only used by pccif1 to OR on a bit?)
@@ -508,7 +549,9 @@ class PCCIF_Periph(PassthroughPeripheral):
                         f"PCCIF ring no too large (value: {value}, is only: {len(self.ringbuffer.offsets)})"
                     )
                     assert False
-                ring = Ringbuf(self.ringbuffer, self.ringbuffer.offsets[value])
+                doorbell = getattr(self, "reply_doorbell", None)
+                notify = (lambda: doorbell.notify(value)) if doorbell is not None else None
+                ring = Ringbuf(self.ringbuffer, self.ringbuffer.offsets[value], on_reply=notify)
                 capacity = self.ringbuffer.read_raw(ring.offset + 8, 4)
                 # A doorbell can cover several queued packets. Bound the work;
                 # never silently leave the rest behind or loop without limit.
@@ -525,11 +568,14 @@ class PCCIF_Periph(PassthroughPeripheral):
                     raise RuntimeError("CCIF receive ring exceeded bounded drain budget")
         elif offset == 0x14:
             # ACK
-            self.log.debug(f"ACK {self.rchnum:x}")
-            if (self.rchnum & value) != value:
+            doorbell = getattr(self, "reply_doorbell", None)
+            pending = self.rchnum | (doorbell.pending if doorbell is not None else 0)
+            self.log.debug(f"ACK {pending:x}")
+            if (pending & value) != value:
                 self.log.warning("ACKed channels which aren't ready!")
-            value = self.rchnum & value
-            self.rchnum = self.rchnum ^ value
+            self.rchnum &= ~value
+            if doorbell is not None:
+                doorbell.acknowledge(value)
         elif offset == 0x20 or offset == 0x24:
             # IRQ0/1 mask, pccif1 only?
             return super().hw_write(offset, size, value)

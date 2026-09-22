@@ -91,6 +91,10 @@ class MTKSection:
 class MTKLoader(firmwire.loader.Loader):
     NAME = "mtk"
     LOADER_ARGS = {
+        "ccif_notifications": {
+            "type": str, "choices": ["disabled", "ring-index-channel-bit-analysis"], "default": "disabled",
+            "help": "OPT-IN ring reply channel bits in RCHNUM, cleared by ACK; no CPU interrupt injection",
+        },
         "bsi_scheduler": {
             "type": str, "choices": ["disabled", "mt6768-enable-capture-analysis"], "default": "disabled",
             "help": "OPT-IN UNVERIFIED BSI scheduler write capture; no inferred enable policy, readback, dispatch or IRQs",
@@ -512,6 +516,16 @@ class MTKLoader(firmwire.loader.Loader):
         return True
 
     def build_memory_map(self):
+        notifications = self.loader_args.get("ccif_notifications", "disabled")
+        if notifications not in ("disabled", "ring-index-channel-bit-analysis"):
+            raise ValueError("Unsupported CCIF reply notification ABI")
+        if notifications != "disabled":
+            if self.boot_mode != "native":
+                raise ValueError("CCIF notifications require native boot mode")
+            targets = [p for p in self.modem_soc.peripherals
+                       if issubclass(p._cls, PCCIF_Periph) and p._attr.get("pccifid") == 0]
+            if len(targets) != 1:
+                raise ValueError("CCIF notifications require exactly one ring transport")
         ipc_mode = self.loader_args.get("ccci_ipc", "disabled")
         if ipc_mode not in ("disabled", "wmt-unavailable"):
             raise ValueError("Unsupported CCCI IPC policy")
@@ -551,9 +565,13 @@ class MTKLoader(firmwire.loader.Loader):
                 attributes = dict(peripheral._attr)
                 attributes["pmic_target"] = self.pmic_analysis_binding.target
                 self.create_peripheral(peripheral, peripheral._address, peripheral._size, **attributes)
-            elif ((ipc_mode != "disabled" or ports_profile is not None or mailbox_dispatcher is not None) and issubclass(peripheral._cls, PCCIF_Periph)
+            elif ((notifications != "disabled" or ipc_mode != "disabled" or ports_profile is not None or mailbox_dispatcher is not None) and issubclass(peripheral._cls, PCCIF_Periph)
                     and peripheral._attr.get("pccifid") == 0):
                 attributes = dict(peripheral._attr)
+                if notifications != "disabled":
+                    attributes["reply_notifications"] = notifications
+                    self.capability_report["ccif_notifications"] = dict(abi=notifications,
+                        analysis_only=True, cpu_interrupt_connected=False, application_delivery_verified=False)
                 if ipc_mode != "disabled":
                     attributes["ipc_dispatcher"] = unavailable_wmt_dispatcher()
                     self.capability_report["ccci_ipc"] = {

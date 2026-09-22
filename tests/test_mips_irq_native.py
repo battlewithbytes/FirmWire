@@ -12,7 +12,7 @@ import time
 import unittest
 
 
-def child(directory, model, routed=False):
+def child(directory, model, routed=False, mdcirq=False):
     from pandare import Panda
     from keystone import Ks, KS_ARCH_MIPS, KS_MODE_MIPS32, KS_MODE_LITTLE_ENDIAN
     from firmwire.hw.uart import UARTCore, UARTRegisterBank
@@ -52,6 +52,9 @@ def child(directory, model, routed=False):
     """,addr=0x80000000)
     claim_code = "lw $k0, 0x20($k1); sw $k0, 0x1010($t7)" if routed else ""
     complete_code = "lw $k0, 0x1010($t7); sw $k0, 0x24($k1)" if routed else ""
+    if mdcirq:
+        claim_code = "lw $k0, 0x1c20($k1); sw $k0, 0x1010($t7)"
+        complete_code = "li $k0, 0xffff; sw $k0, 0x1c70($k1)"
     handler, _ = assembler.asm("""
         mfc0 $k0, $13
         sw $k0, 0x1004($t7)
@@ -76,15 +79,25 @@ def child(directory, model, routed=False):
         levels.append(level)
         endpoint(level)
     controller = None
-    if routed:
+    if mdcirq:
+        from firmwire.vendor.mtk.hw.mdcirq import MdcirqNormalIRQBank
+        controller = MdcirqNormalIRQBank([irq], minimum_inclusive=False, source_count=8)
+        controller.write(0x300, 0x0c7f7f7f)
+        controller.write(0x600, 0)
+        controller.write(0x400, 386)
+        controller.write(0x40, 8)
+    elif routed:
         from firmwire.hw.routed_irq import RoutedLevelIRQController
         controller = RoutedLevelIRQController(8, [irq])
         controller.configure(3, priority=12, targets=[0])
         controller.set_mask(3, False)
-    core = UARTCore(16, (lambda level: controller.set_level(3, level)) if routed else irq)
+    core = UARTCore(16, (lambda level: controller.set_level(3, level)) if (routed or mdcirq) else irq)
     bank = UARTRegisterBank(core,stride=4,access_sizes=(4,))
     @panda.cb_unassigned_io_write
     def write(cpu,pc,address,size,value):
+        if mdcirq and uart_base+0x1000 <= address < uart_base+0x2000:
+            controller.write(address-uart_base-0x1000, int(value), size)
+            return True
         if routed and address == uart_base + 0x24 and size == 4:
             controller.complete(0, int(value))
             return True
@@ -94,6 +107,9 @@ def child(directory, model, routed=False):
         return False
     @panda.cb_unassigned_io_read
     def read(cpu,pc,address,size,value):
+        if mdcirq and uart_base+0x1000 <= address < uart_base+0x2000:
+            value[0] = controller.read(address-uart_base-0x1000, size)
+            return True
         if routed and address == uart_base + 0x20 and size == 4:
             source = controller.claim(0)
             value[0] = 0xffffffff if source is None else source
@@ -134,6 +150,8 @@ def child(directory, model, routed=False):
                           exceptions=exceptions,rejects=rejects,rx_remaining=len(core.rx))
             if routed:
                 report.update(controller=controller.snapshot(), claimed_source=word(0x1010))
+            if mdcirq:
+                report.update(mdcirq=controller.snapshot(), claimed_source=word(0x1010))
             (root/"result.tmp").write_text(json.dumps(report))
             (root/"result.tmp").replace(root/"result.json")
     if not hasattr(panda,"setup_internal_signal_handler"):
@@ -154,11 +172,17 @@ class MipsIRQNativeTests(unittest.TestCase):
         for model in ("24Kc", "cockpit-mtk-legacy"):
             with self.subTest(model=model): self.check_model(model, routed=True)
 
-    def check_model(self, model, routed=False):
+    @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_IRQ") == "1", "requires IRQ development engine")
+    def test_mdcirq_guest_reads_id_and_restores_previous_id(self):
+        for model in ("24Kc", "cockpit-mtk-legacy"):
+            with self.subTest(model=model): self.check_model(model, mdcirq=True)
+
+    def check_model(self, model, routed=False, mdcirq=False):
         with tempfile.TemporaryDirectory(prefix="irq-native-") as directory, tempfile.TemporaryFile(mode="w+") as log:
             result = Path(directory)/"result.json"
             command = [sys.executable,"-B",str(Path(__file__).resolve()),"--child",directory,model]
             if routed: command.append("--routed")
+            if mdcirq: command.append("--mdcirq")
             proc = subprocess.Popen(command,
                                     stdout=log,stderr=subprocess.STDOUT)
             try:
@@ -187,8 +211,14 @@ class MipsIRQNativeTests(unittest.TestCase):
                 self.assertEqual(report["controller"]["active"], [[]])
                 self.assertEqual(report["controller"]["pending"], [[]])
                 self.assertFalse(report["controller"]["hardware_semantics_verified"])
+            if mdcirq:
+                self.assertEqual(report["claimed_source"], 3)
+                self.assertEqual(report["mdcirq"]["controller"]["active"], [[]])
+                self.assertEqual(report["mdcirq"]["controller"]["pending"], [[]])
+                self.assertFalse(report["mdcirq"]["hardware_semantics_verified"])
 
 
 if __name__ == "__main__":
-    if len(sys.argv) in (4,5) and sys.argv[1]=="--child": child(sys.argv[2],sys.argv[3],len(sys.argv)==5)
+    if len(sys.argv) in (4,5) and sys.argv[1]=="--child":
+        child(sys.argv[2],sys.argv[3],"--routed" in sys.argv,"--mdcirq" in sys.argv)
     else: unittest.main()

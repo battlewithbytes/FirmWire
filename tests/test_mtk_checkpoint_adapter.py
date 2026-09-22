@@ -189,6 +189,25 @@ class CheckpointAdapterTests(unittest.TestCase):
                 self.assertFalse(self.saved[-1]["execution"]["peripheral_controls"]
                                  ["RELOCATED_IRQ"]["semantics_verified"])
 
+    def test_pccif_observer_requires_device_type_not_platform_name(self):
+        from firmwire.vendor.mtk.hw.PCCIFPeripheral import PCCIF_Periph
+        for real in (True, False):
+            with tempfile.TemporaryDirectory() as directory:
+                machine = self.make_machine(self.profile(directory, peripheral_controls=["RELOCATED_CCIF"]))
+                device = object.__new__(PCCIF_Periph) if real else SimpleNamespace()
+                device.enable_control_observer = Mock()
+                device.control_observation = lambda: {"read_only": True, "semantics_verified": False}
+                machine.peripheral_map["RELOCATED_CCIF"] = device
+                if not real:
+                    with self.assertRaisesRegex(ValueError, "Unsupported control observer"):
+                        install(machine)
+                    continue
+                install(machine)
+                self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
+                device.enable_control_observer.assert_called_once()
+                self.assertFalse(self.saved[-1]["execution"]["peripheral_controls"]
+                                 ["RELOCATED_CCIF"]["semantics_verified"])
+
     def test_d2bif_observer_is_explicit_and_keeps_analysis_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             machine = self.make_machine(self.profile(directory, peripheral_controls=["D2BIF", "LTE_TIMER"]))
