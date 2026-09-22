@@ -791,8 +791,9 @@ class MT6878Machine(FirmWireEmu):
             allowed_controls = {"AES_TOP0", "MODEML1_AO_BSI_MM_2", "IDC_CTRL", "LTE_TIMER", "D2BIF"}
             from .hw.AbbMixPeripheral import AbbMixAnalysisPeripheral
             from .hw.PCCIFPeripheral import SHM_CCIF_Periph
+            from .hw.MDCPeripheral import MDCIRQ_Periph
             for name, device in self.peripheral_map.items():
-                if isinstance(device, SHM_CCIF_Periph):
+                if isinstance(device, (SHM_CCIF_Periph, MDCIRQ_Periph)):
                     allowed_controls.add(name)
             if isinstance(self.peripheral_map.get("ABBMIX_CAL"), AbbMixAnalysisPeripheral):
                 allowed_controls.add("ABBMIX_CAL")

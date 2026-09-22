@@ -33,6 +33,20 @@ class MDCIRQ_Periph(PassthroughPeripheral):
     def __init__(self, name, address, size, **kwargs):
         super().__init__(name, address, size, **kwargs)
 
+    def enable_control_observer(self):
+        from firmwire.hw.register_observer import RegisterAccessObserver
+        if not hasattr(self, "register_observer"):
+            self.register_observer = RegisterAccessObserver(len(self.mem))
+
+    def control_observation(self):
+        return self.register_observer.snapshot()
+
+    def hw_read(self, offset, size):
+        value = super().hw_read(offset, size)
+        if hasattr(self, "register_observer"):
+            self.register_observer.record("read", offset, size, value)
+        return value
+
     def hw_write(self, offset, size, value):
         if offset >= 0 and offset <= 0x20:
             pass  # int status
@@ -64,4 +78,7 @@ class MDCIRQ_Periph(PassthroughPeripheral):
             pass  # wait mode
         elif offset == 0x1A8:
             pass  # mask incoming GCR signals
-        return super().hw_write(offset, size, value)
+        result = super().hw_write(offset, size, value)
+        if hasattr(self, "register_observer"):
+            self.register_observer.record("write", offset, size, value)
+        return result
