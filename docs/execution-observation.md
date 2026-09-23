@@ -39,3 +39,25 @@ evidence: a truncated history cannot prove every historical return value.
 The MIPS hardware IRQ path bypasses PANDA's exception callback; see
 `ccif-notifications.md`. Neither zero exception callbacks nor a growing block
 count alone proves modem startup or a real AP handshake.
+
+## Quiet scheduling observations
+
+With a validated RAM observer and an explicitly realized MT topology, native
+MTK checkpoints also capture `firmwire.scheduling-observation/v1` through the
+reusable `emulator/scheduling_observation.py` helper. It retains the first and
+latest 16 samples of virtual-clock nanoseconds and each requested CPU's index,
+PC and QEMU/debugger `stopped` state. `stopped` is **not** architectural halt or
+MIPS VPE/TC eligibility; false does not prove that CPU is being scheduled.
+
+Sampling runs on the emulator thread at existing checkpoints, using compiled
+`qemu_get_cpu`, `cpu_is_stopped`, `qemu_clock_get_ns` and `panda_current_pc`
+accessors. CPU pointers remain opaque; no stale Python CPU-structure offsets
+are dereferenced. Extra exported functions use ctypes because compiled CFFI
+backends do not support adding `cdef` declarations at runtime. The existing
+compiled CFFI PC accessor supplies the correct target word size.
+
+There are no monitor requests, stop/resume commands, IRQ injections, clock
+enable calls or guest writes. As with any instrumentation, timing overhead can
+affect a race: successful instrumented runs do not establish a scheduling fix.
+The API captures facts only and never sets a full-boot flag. Engines lacking
+the required accessors or the requested CPUs fail explicitly.

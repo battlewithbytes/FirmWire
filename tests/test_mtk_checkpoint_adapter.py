@@ -38,6 +38,29 @@ install = namespace["_install_execution_evidence"]
 
 
 class CheckpointAdapterTests(unittest.TestCase):
+    def test_scheduling_samples_only_executed_checkpoints_with_explicit_topology(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = self.make_machine(self.profile(directory))
+            machine.loader.capability_report["engine_topology"] = {"realized_cpu_objects": 4}
+            with patch("firmwire.emulator.scheduling_observation.SchedulingObserver") as observer:
+                observer.return_value.sample.return_value = {"read_only": True}
+                install(machine)
+                observer.assert_called_once_with(machine.panda, 4)
+                for code in (2,3): self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), code)
+                observer.return_value.sample.assert_not_called()
+                self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
+                observer.return_value.sample.assert_called_once_with(1)
+                self.assertEqual(machine.loader.capability_report["execution"]["scheduling"], {"read_only":True})
+
+    def test_topology_alone_does_not_enable_scheduling_diagnostics(self):
+        machine = self.make_machine()
+        machine.loader.capability_report["engine_topology"] = {"realized_cpu_objects": 4}
+        with patch("firmwire.emulator.scheduling_observation.SchedulingObserver") as observer:
+            install(machine)
+            self.callbacks["block"]("cpu", SimpleNamespace(pc=0x2000), 0)
+            observer.assert_not_called()
+            self.assertNotIn("scheduling", machine.loader.capability_report["execution"])
+
     def test_nonexecuted_tb_exits_do_not_count_or_sample_markers(self):
         with tempfile.TemporaryDirectory() as directory:
             machine = self.make_machine(self.profile(directory))

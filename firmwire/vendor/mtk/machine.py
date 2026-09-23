@@ -754,6 +754,7 @@ class MT6878Machine(FirmWireEmu):
         exception_trace = None
         io_trace = None
         ram_sampler = None
+        scheduling_observer = None
 
         def sample_ram():
             if ram_sampler is None:
@@ -785,6 +786,10 @@ class MT6878Machine(FirmWireEmu):
                 config = json.load(source)
             ram_sampler = RamObservation(config, report["rom_sha256"],
                 self.avatar.memory_ranges.at, self.panda.physical_memory_read)
+            topology = report.get("engine_topology", {})
+            if topology.get("realized_cpu_objects"):
+                from firmwire.emulator.scheduling_observation import SchedulingObserver
+                scheduling_observer = SchedulingObserver(self.panda, topology["realized_cpu_objects"])
             watches = ram_sampler.words
             pc_markers = validate_pc_markers(config)
             if "v0_trace" in config:
@@ -887,6 +892,8 @@ class MT6878Machine(FirmWireEmu):
             # Persist early progress and exponentially-spaced checkpoints, not
             # every instruction. A killed run retains a conservative count.
             if first_marker or count in (1, 10, 100, 1000, 10000) or count % 100000 == 0:
+                if scheduling_observer is not None:
+                    execution["scheduling"] = scheduling_observer.sample(count)
                 execution["recent_pcs"] = list(recent)
                 if exception_trace is not None:
                     execution["cpu_exceptions"] = exception_trace.snapshot()
