@@ -85,9 +85,9 @@ class MDCIRQ_Periph(PassthroughPeripheral):
         elif offset >= 0x100 and offset < 0x120:
             pass  # type (is NMI?)
         elif offset >= 0x120 and offset < 0x140:
-            pass  # sw trigger set
+            pass  # sw trigger clear (not external-input deassertion)
         elif offset >= 0x140 and offset < 0x160:
-            pass  # sw trigger clear
+            pass  # sw trigger set
         elif offset >= 0x160 and offset < 0x180:
             pass  # sensitivity set
         elif offset >= 0x180 and offset < 0x1A0:

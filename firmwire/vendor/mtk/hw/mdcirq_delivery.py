@@ -100,7 +100,9 @@ class MdcirqLevelDelivery:
                 values[word] = updated
         # Do not silently accept a software-trigger request for a selected
         # external level input. Other inputs remain explicitly unmodeled.
-        for base in (0x80, 0x120):
+        # +0x120 is CLEAR, not SET: clearing software state cannot lower
+        # an external input. See docs/mdcirq-software-trigger-banks.md.
+        for base in (0x80, 0x140):
             if base <= offset < base+4*len(self.sensitivity):
                 if size != 4 or offset % 4: raise ValueError("software trigger requires aligned word")
                 word = (offset-base)//4

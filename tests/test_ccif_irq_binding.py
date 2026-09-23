@@ -108,7 +108,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_modes_refuse_selected_edge_broadcast_nmi_and_software_trigger(self):
         delivery = self.delivery()
-        for offset in (0xa0,0xc0,0x100,0x160,0x80,0x120):
+        for offset in (0xa0,0xc0,0x100,0x160,0x80,0x140):
             before = delivery.snapshot()
             with self.subTest(offset=offset), self.assertRaises(NotImplementedError):
                 delivery.write(offset,4,64)
@@ -126,6 +126,28 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse(delivery.write(0x800,4,123))
         self.assertEqual(delivery.snapshot()["other_registers"],"existing-passthrough")
         self.assertEqual(delivery.snapshot()["unselected_inputs"],"unmodeled")
+
+    def test_software_set_guard_covers_each_selected_bank(self):
+        for source in (6, 76, 143, 255):
+            delivery = MdcirqLevelDelivery([Mock()], [source], minimum_inclusive=True)
+            word, bit = source // 32, 1 << (source % 32)
+            for base in (0x80, 0x140):
+                before = delivery.snapshot()
+                with self.subTest(source=source, base=base), self.assertRaises(NotImplementedError):
+                    delivery.write(base + 4*word, 4, bit)
+                self.assertEqual(delivery.snapshot(), before)
+                self.assertFalse(delivery.write(base + 4*word, 4, 0))
+                self.assertFalse(delivery.write(base + 4*word, 4, bit ^ 0xffffffff))
+
+    def test_software_clear_cannot_deassert_external_input(self):
+        for source in (6, 76, 143, 255):
+            delivery = MdcirqLevelDelivery([Mock()], [source], minimum_inclusive=True)
+            delivery.write(0x1a8, 4, 1)
+            delivery.set_level(source, True)
+            before = delivery.snapshot()
+            self.assertFalse(delivery.write(0x120 + 4*(source//32), 4, 1 << (source%32)))
+            self.assertEqual(delivery.snapshot(), before)
+            self.assertTrue(delivery.bank.core.levels[source])
 
 
 class BindingTests(unittest.TestCase):
