@@ -151,6 +151,37 @@ class DeliveryTests(unittest.TestCase):
 
 
 class BindingTests(unittest.TestCase):
+    def test_v2_is_explicit_bounded_and_v1_cannot_enable_software(self):
+        p = dict(profile(), schema="firmwire.ccif-normal-irq-analysis/v2", software_sources=[7, 31])
+        validate_profile(p, "a"*64, "synthetic", 2)
+        for sources in ([], [7,7], [True], [256], list(range(33)), "7"):
+            with self.subTest(sources=sources), self.assertRaises(ValueError):
+                validate_profile(dict(p, software_sources=sources), "a"*64, "synthetic", 2)
+        with self.assertRaises(ValueError):
+            validate_profile(dict(profile(), software_sources=[7]), "a"*64, "synthetic", 2)
+
+    def test_v2_binds_selected_software_to_deferred_native_endpoint(self):
+        p = dict(profile(), schema="firmwire.ccif-normal-irq-analysis/v2", software_sources=[7])
+        machine, endpoints = self.machine(), [Mock(), Mock()]
+        with patch("builtins.open", mock_open(read_data=json.dumps(p).encode())):
+            bind_profile(machine, "profile.json", Mock(side_effect=endpoints))
+        d = machine.peripheral_map["irq"].irq_delivery
+        d.write(0x1a8, 4, 1)
+        d.write(0x600, 4, 1)
+        d.write(0x180, 4, 128)
+        d.write(0xc0, 4, 128)
+        d.write(0x40, 4, 128)
+        d.write(0x140, 4, 128)
+        endpoints[1].assert_not_called()
+        machine.panda.cb_after_block_exec.call_args.args[0](None, None, None)
+        endpoints[1].assert_called_once_with(True)
+        endpoints[0].assert_not_called()
+        self.assertEqual(d.read(0xc24, 4), 7)
+        d.write(0x120, 4, 128)
+        d.write(0xc74, 4, 0x1ff)
+        row = next(row for row in d.snapshot()["sources"] if row["source"] == 7)
+        self.assertEqual((row["claims"], row["returns"]), (1, 1))
+
     def machine(self):
         controller, transport = object.__new__(MDCIRQ_Periph), object.__new__(PCCIF_Periph)
         transport.reply_doorbell = ChannelDoorbell(4)

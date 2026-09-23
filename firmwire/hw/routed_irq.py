@@ -68,10 +68,18 @@ class RoutedLevelIRQController:
         self._update()
 
     def set_level(self, source, level):
-        self._source(source)
-        if type(level) is not bool:
-            raise ValueError("interrupt level must be boolean")
-        self.levels[source] = level
+        self.set_levels([(source, level)])
+
+    def set_levels(self, updates):
+        checked, seen = [], set()
+        for source, level in updates:
+            self._source(source)
+            if type(level) is not bool or source in seen:
+                raise ValueError("invalid or duplicate interrupt level")
+            checked.append((source, level))
+            seen.add(source)
+        for source, level in checked:
+            self.levels[source] = level
         self._update()
 
     def set_mask(self, source, masked):

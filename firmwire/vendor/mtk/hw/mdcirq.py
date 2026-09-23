@@ -80,7 +80,10 @@ class MdcirqNormalIRQBank:
         self.core.configure_many(updates)
 
     def set_level(self, source, level):
-        self.core.set_level(source, level)
+        self.set_levels([(source, level)])
+
+    def set_levels(self, updates):
+        self.core.set_levels(updates)
         self._flush()
 
     def read(self, offset, size=4):

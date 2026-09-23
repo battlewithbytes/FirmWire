@@ -12,8 +12,10 @@ from .hw.mdcirq_delivery import MdcirqLevelDelivery
 def validate_profile(profile, rom_sha256, cpu_model, cpu_count):
     fields = {"schema", "rom_sha256", "cpu_model", "evidence", "controller", "transport",
               "minimum_inclusive", "outputs", "routes"}
+    if isinstance(profile, dict) and profile.get("schema") == "firmwire.ccif-normal-irq-analysis/v2":
+        fields.add("software_sources")
     if (not isinstance(profile, dict) or set(profile) != fields
-            or profile["schema"] != "firmwire.ccif-normal-irq-analysis/v1"
+            or profile["schema"] not in ("firmwire.ccif-normal-irq-analysis/v1", "firmwire.ccif-normal-irq-analysis/v2")
             or profile["rom_sha256"] != rom_sha256 or profile["cpu_model"] != cpu_model):
         raise ValueError("IRQ profile identity/schema does not match")
     if type(profile["minimum_inclusive"]) is not bool:
@@ -44,9 +46,13 @@ def validate_profile(profile, rom_sha256, cpu_model, cpu_count):
         masks.append((row["channel_mask"], lambda _: None))
         sources.append(row["source"])
     ChannelIRQRouter(masks)
+    software = profile.get("software_sources", [])
+    if (not isinstance(software, list) or len(software) > 32
+            or ("software_sources" in fields and not software)):
+        raise ValueError("requires bounded explicit software sources")
     # Exercise all geometry checks without touching a native CPU or device.
     MdcirqLevelDelivery([lambda _: None] * cpu_count, sources,
-                        minimum_inclusive=profile["minimum_inclusive"])
+                        minimum_inclusive=profile["minimum_inclusive"], software_sources=software)
     return profile
 
 
@@ -74,7 +80,8 @@ def bind_profile(machine, path, endpoint_factory=MipsIRQInput):
     deferred = DeferredIRQOutputs(outputs)
     controller.enable_irq_delivery([deferred.input(index) for index in range(len(outputs))],
                                    [row["source"] for row in profile["routes"]],
-                                   minimum_inclusive=profile["minimum_inclusive"])
+                                   minimum_inclusive=profile["minimum_inclusive"],
+                                   software_sources=profile.get("software_sources", []))
     @machine.panda.cb_after_block_exec
     def flush_irq_outputs(cpu, tb, exit_code):
         deferred.flush()

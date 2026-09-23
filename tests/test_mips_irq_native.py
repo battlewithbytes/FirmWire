@@ -12,7 +12,7 @@ import time
 import unittest
 
 
-def child(directory, model, routed=False, mdcirq=False, ccif=False):
+def child(directory, model, routed=False, mdcirq=False, ccif=False, software=False):
     from pandare import Panda
     from keystone import Ks, KS_ARCH_MIPS, KS_MODE_MIPS32, KS_MODE_LITTLE_ENDIAN
     from firmwire.hw.uart import UARTCore, UARTRegisterBank
@@ -30,6 +30,7 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
         li $t7, 0x80000000
         li $t1, 1
         sw $t1, 4($t0)
+        """ + ("li $t1, 8; sw $t1, 0x1140($t0); li $t1, 1;" if software else "") + """
         sw $t1, 0x1100($t7)
         j enabled
         nop
@@ -57,6 +58,7 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
         claim_code = "lw $k0, 0x1c20($k1); sw $k0, 0x1010($t7)"
         complete_code = "li $k0, 0xffff; sw $k0, 0x1c70($k1)"
     ack_code = "lw $k0, 0x34($k1); sw $k0, 0x1014($t7); sw $k0, 0x30($k1); " if ccif else ""
+    if software: ack_code = "li $k0, 8; sw $k0, 0x1120($k1); "
     handler, _ = assembler.asm("""
         mfc0 $k0, $13
         sw $k0, 0x1004($t7)
@@ -87,7 +89,9 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
         from firmwire.hw.irq_router import ChannelIRQRouter
         from firmwire.emulator.mips_irq import DeferredIRQOutputs
         deferred = DeferredIRQOutputs([irq])
-        controller = MdcirqLevelDelivery([deferred.input(0)], [3], minimum_inclusive=True, source_count=8)
+        controller = MdcirqLevelDelivery([deferred.input(0)], [3], minimum_inclusive=True,
+            source_count=8, software_sources=[3] if software else [])
+        if software: controller.write(0x180, 4, 8)
         controller.write(0x1a8, 4, 1)
         controller.write(0x600, 4, 0)
         controller.write(0x400, 4, 383)
@@ -112,7 +116,8 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
     @panda.cb_unassigned_io_write
     def write(cpu,pc,address,size,value):
         if ccif and uart_base+0x1000 <= address < uart_base+0x2000:
-            return controller.write(address-uart_base-0x1000, size, int(value))
+            controller.write(address-uart_base-0x1000, size, int(value))
+            return True
         if ccif and address == uart_base+0x30 and size == 4:
             doorbell.acknowledge(int(value))
             return True
@@ -174,7 +179,7 @@ def child(directory, model, routed=False, mdcirq=False, ccif=False):
         if word(0x1100) and not injected:
             injected = True
             core.receive(b"Z")
-            if ccif: doorbell.notify(4)
+            if ccif and not software: doorbell.notify(4)
         if ccif: deferred.flush()
         if blocks <= 8 or blocks == 1024:
             (root/"debug.json").write_text(json.dumps(dict(recent=recent, exceptions=exceptions[:16],
@@ -221,13 +226,19 @@ class MipsIRQNativeTests(unittest.TestCase):
         for model in ("24Kc", "cockpit-mtk-legacy"):
             with self.subTest(model=model): self.check_model(model, ccif=True)
 
-    def check_model(self, model, routed=False, mdcirq=False, ccif=False):
+    @unittest.skipUnless(os.environ.get("FIRMWIRE_TEST_NATIVE_IRQ") == "1", "requires IRQ development engine")
+    def test_guest_software_set_claim_clear_return_and_eret(self):
+        for model in ("24Kc", "cockpit-mtk-legacy"):
+            with self.subTest(model=model): self.check_model(model, ccif=True, software=True)
+
+    def check_model(self, model, routed=False, mdcirq=False, ccif=False, software=False):
         with tempfile.TemporaryDirectory(prefix="irq-native-") as directory, tempfile.TemporaryFile(mode="w+") as log:
             result = Path(directory)/"result.json"
             command = [sys.executable,"-B",str(Path(__file__).resolve()),"--child",directory,model]
             if routed: command.append("--routed")
             if mdcirq: command.append("--mdcirq")
             if ccif: command.append("--ccif")
+            if software: command.append("--software")
             proc = subprocess.Popen(command,
                                     stdout=log,stderr=subprocess.STDOUT)
             try:
@@ -265,14 +276,18 @@ class MipsIRQNativeTests(unittest.TestCase):
                 self.assertFalse(report["mdcirq"]["hardware_semantics_verified"])
             if ccif:
                 self.assertEqual(report["claimed_source"], 3)
-                self.assertEqual(report["channels_read"], 16)
+                self.assertEqual(report["channels_read"], 0 if software else 16)
                 self.assertEqual(report["doorbell"]["pending"], 0)
                 self.assertEqual(report["ccif"]["claims"], [1])
                 self.assertEqual(report["ccif"]["returns"], [1])
                 self.assertEqual(report["ccif"]["controller"]["active"], [[]])
+                if software:
+                    self.assertEqual(report["ccif"]["software"]["sources"],
+                        [dict(source=3, pending=False, posts=1, clears=1, level_configured=True)])
 
 
 if __name__ == "__main__":
-    if len(sys.argv) in (4,5) and sys.argv[1]=="--child":
-        child(sys.argv[2],sys.argv[3],"--routed" in sys.argv,"--mdcirq" in sys.argv,"--ccif" in sys.argv)
+    if len(sys.argv) in (4,5,6) and sys.argv[1]=="--child":
+        child(sys.argv[2],sys.argv[3],"--routed" in sys.argv,"--mdcirq" in sys.argv,"--ccif" in sys.argv,
+              "--software" in sys.argv)
     else: unittest.main()

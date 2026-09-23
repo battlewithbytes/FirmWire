@@ -46,16 +46,18 @@ class MDCIRQ_Periph(PassthroughPeripheral):
             facts["irq_output_handoff"] = self.irq_output_handoff.snapshot()
         return facts
 
-    def enable_irq_delivery(self, outputs, sources, *, minimum_inclusive):
+    def enable_irq_delivery(self, outputs, sources, *, minimum_inclusive, software_sources=()):
         from .mdcirq_delivery import MdcirqLevelDelivery
         if hasattr(self, "irq_delivery"):
             raise ValueError("IRQ controller already connected")
-        self.irq_delivery = MdcirqLevelDelivery(outputs, sources, minimum_inclusive=minimum_inclusive)
+        self.irq_delivery = MdcirqLevelDelivery(outputs, sources, minimum_inclusive=minimum_inclusive,
+                                              software_sources=software_sources)
 
     def hw_read(self, offset, size):
         delivery = getattr(self, "irq_delivery", None)
         value = delivery.read(offset, size) if delivery is not None else None
         if value is None: value = super().hw_read(offset, size)
+        if delivery is not None: value = delivery.merge_software_read(offset, size, value)
         if hasattr(self, "register_observer"):
             self.register_observer.record("read", offset, size, value)
         return value
