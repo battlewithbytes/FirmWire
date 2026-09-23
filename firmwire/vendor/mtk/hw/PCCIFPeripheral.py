@@ -481,9 +481,12 @@ class PCCIF_Periph(PassthroughPeripheral):
 
     def enable_control_observer(self):
         from firmwire.hw.register_observer import RegisterAccessObserver
+        from .ccci_boot_observer import CCCIBootObserver
         if not hasattr(self, "register_observer"):
             # Control registers only: do not retain SRAM message payloads.
             self.register_observer = RegisterAccessObserver(0x100)
+            if self.pccifid == 0:
+                self.boot_observer = CCCIBootObserver()
 
     def control_observation(self):
         facts = self.register_observer.snapshot()
@@ -493,6 +496,8 @@ class PCCIF_Periph(PassthroughPeripheral):
                 cpu_interrupt_connected=hasattr(self, "reply_irq_router"), application_delivery_verified=False)
         if hasattr(self, "reply_irq_router"):
             facts["reply_irq_router"] = self.reply_irq_router.snapshot()
+        if hasattr(self, "boot_observer"):
+            facts["boot_protocol"] = self.boot_observer.snapshot()
         return facts
 
     # 0 CON, 4 BUSY, C TCHNUM, 14 ACK, 100 CHDATA
@@ -856,6 +861,8 @@ class PCCIF_Periph(PassthroughPeripheral):
 
     def handleControlPacket(self, ring, buff):
         # Linux ccci_fsm_recv_control_packet, TODO: merge with handle_SRAM_write, below
+        if hasattr(self, "boot_observer"):
+            self.boot_observer.control(buff)
         data0, data1, channel, seq_num, reserved = struct.unpack("<IIHHI", buff[:16])
 
         self.log.info(f"control message {data1},{reserved}")
@@ -863,13 +870,15 @@ class PCCIF_Periph(PassthroughPeripheral):
             # MD_INIT_START_BOOT
             # second time we see this: HS2
             # self.log.info("FSM: MD reports that it finished booting \( ﾟヮﾟ)/")
-            self.log.info("FSM: MD reports that it finished booting")
+            self.log.info("FSM: MD boot control message received (readiness not inferred)")
         else:
             self.log.error("Unhandled control packet %x", data1)
             assert False
 
     def handle_SRAM_write(self):
         # ccci_fsm_recv_control_packet
+        if hasattr(self, "boot_observer"):
+            self.boot_observer.hs1(bytes(self.read_raw(0x100 + i, 1) for i in range(88)))
         msg = self.mem[0x100 + 4]
         if msg == 0:
             # MD_INIT_START_BOOT
@@ -935,6 +944,8 @@ class PCCIF_Periph(PassthroughPeripheral):
             )  # tail_pattern
 
             # done, send message back
+            if hasattr(self, "boot_observer"):
+                self.boot_observer.ap_response(bytes(self.read_raw(0x1F0 + i, 1) for i in range(0xAC)))
             self.rchnum = self.rchnum | (1 << 15)  # TODO: why 15
         else:
             self.log.error("FSM: unknown message %x", msg)
